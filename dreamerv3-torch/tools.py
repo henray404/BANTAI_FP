@@ -55,7 +55,7 @@ class TimeRecording:
 
 
 class Logger:
-    def __init__(self, logdir, step):
+    def __init__(self, logdir, step, use_wandb=False, wandb_project=None, wandb_config=None):
         self._logdir = logdir
         self._writer = SummaryWriter(log_dir=str(logdir), max_queue=1000)
         self._last_step = None
@@ -64,6 +64,16 @@ class Logger:
         self._images = {}
         self._videos = {}
         self.step = step
+        # W&B setup
+        self._use_wandb = use_wandb
+        if use_wandb:
+            import wandb
+            wandb.init(
+                project=wandb_project or "dreamer-slope",
+                config=wandb_config or {},
+                resume="allow",
+            )
+            print(f"[W&B] Run: {wandb.run.name} | Project: {wandb_project or 'dreamer-slope'}")
 
     def scalar(self, name, value):
         self._scalars[name] = float(value)
@@ -99,6 +109,17 @@ class Logger:
             self._writer.add_video(name, value, step, 16)
 
         self._writer.flush()
+        # W&B logging
+        if self._use_wandb:
+            import wandb
+            wb_log = {"train/step": step}
+            wb_log.update({
+                (k if "/" in k else f"train/{k}"): v
+                for k, v in scalars
+            })
+            for name, value in self._images.items():
+                wb_log[f"media/{name}"] = wandb.Image(value)
+            wandb.log(wb_log, step=step)
         self._scalars = {}
         self._images = {}
         self._videos = {}
