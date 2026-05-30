@@ -90,9 +90,9 @@ scene:
     total_racks: 18
 
   racks:
-    usd: "assets/Shelving/Racks/Rack_A/Rack_A01_PR_NVD_01.usd"
+    usd: "assets/Shelving/Racks/Rack_L/Rack_L01_PR_NVD_01.usd"
     scale: 0.01             # cm->m unit fix; no auto-convert in Isaac Lab UsdFileCfg
-    shelf_z: 1.5            # measured 2026-05-30 (75% of 2.0m rack)
+    shelf_z: 1.5            # RETUNE: was Rack_A (2.0m). Rack_L height unknown -> run explore_rack.py
 
   items:
     count: 18

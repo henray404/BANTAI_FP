@@ -2,18 +2,27 @@
 # Entry script — AppLauncher lives here.
 # Loads full warehouse scene (no RL managers) for layout + item-placement visual check.
 #
-# Run AFTER explore_rack.py confirms RACK_SHELF_Z is correct.
+# Box-on-shelf placement is a pure SIZE-BASED CALCULATION (no fragile mesh sniffing):
+#   * Rack X/Y come from RACK_POSITIONS (known, in meters) — never from a bbox.
+#   * Shelf Z levels = rack_height / (box_size + headroom), evenly spaced bottom->top.
+#     Rack height is measured once (and clamped to a sane range); if measurement looks
+#     wrong it falls back to a 2.0 m default, so box Z is always bounded -> no floating.
+#   * Box Z = floor + shelf_level + box_size/2 + clearance (cube origin assumed centered).
+#   * Extra boxes are spawned to fill the racks so it looks like a stocked warehouse.
 #
 # Usage:
 #   conda activate isaaclab
 #   python asset_sandbox/scripts/explore_scene.py
-#   python asset_sandbox/scripts/explore_scene.py --headless  # render without window
+#   python asset_sandbox/scripts/explore_scene.py --extra-boxes 60 --seed 7
+#   python asset_sandbox/scripts/explore_scene.py --rack-height 2.2   # force rack height (m)
+#   python asset_sandbox/scripts/explore_scene.py --headless
 
-"""Full warehouse layout viewer (no RL env): racks, items, zones, walls, robot."""
+"""Warehouse viewer: size-based box-on-shelf placement, no floating, many boxes."""
 
 from __future__ import annotations
 
 import argparse
+import random
 import sys
 from pathlib import Path
 
@@ -21,6 +30,9 @@ from isaaclab.app import AppLauncher
 
 # ── CLI + AppLauncher ─────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Warehouse scene layout viewer")
+parser.add_argument("--seed", type=int, default=42, help="RNG seed for random box placement")
+parser.add_argument("--extra-boxes", type=int, default=40, help="extra boxes to spawn on top of the scene's 18")
+parser.add_argument("--rack-height", type=float, default=0.0, help="force rack height in meters (0 = auto-measure)")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True  # TiledCamera requires this flag
@@ -40,33 +52,167 @@ from env.warehouse_scene import (
     BOX_LARGE_SIZE,
     BOX_MED_SIZE,
     BOX_SMALL_SIZE,
+    BOX_USD,
     ITEM_SPECS,
     RACK_POSITIONS,
     RACK_SHELF_Z,
     WarehouseSceneCfg,
 )
 
+# ── Tuning constants ──────────────────────────────────────────────────
+BOX_CLEARANCE       = 0.01    # m, gap between shelf surface and box bottom
+SHELF_HEADROOM      = 0.18    # m, vertical gap above the tallest box to the next shelf
+DEFAULT_RACK_HEIGHT = 2.0     # m, used if rack height can't be measured plausibly
+DEFAULT_FOOT_HALF   = 0.50    # m, default rack half-footprint for X/Y jitter
+MIN_RACK_HEIGHT     = 0.30    # m, plausibility bounds for a measured rack
+MAX_RACK_HEIGHT     = 6.00    # m
+XY_JITTER_FRAC      = 0.35    # random X/Y offset as fraction of rack half-footprint
 
-def _print_layout_summary() -> None:
-    """Print current layout constants for quick sanity check."""
-    print("=" * 50)
-    print(f"RACK_SHELF_Z : {RACK_SHELF_Z} m")
-    print(f"BOX sizes    : fragile={BOX_SMALL_SIZE} m | regular={BOX_MED_SIZE} m | heavy={BOX_LARGE_SIZE} m")
-    print(f"Rack positions ({len(RACK_POSITIONS)} racks):")
-    for i, pos in enumerate(RACK_POSITIONS):
-        print(f"  rack_{i}: {pos}")
-    print(f"Item positions ({len(ITEM_SPECS)} items):")
-    for name, size, pos in ITEM_SPECS:
-        print(f"  {name}: size={size:.2f}m  z={pos[2]:.3f}m")
-    print("=" * 50)
-    print("[CHECK] If boxes float above shelf -> decrease RACK_SHELF_Z")
-    print("[CHECK] If boxes clip into rack    -> increase RACK_SHELF_Z")
-    print("[CHECK] Update env/warehouse_scene.py and re-run this script.")
-    print("=" * 50)
+SIZES = (BOX_SMALL_SIZE, BOX_MED_SIZE, BOX_LARGE_SIZE)
+
+
+def _resolve_env_base(stage) -> str | None:
+    """Find the prim path prefix the scene cloned racks under (env_0 vs flat)."""
+    for base in ("/World/envs/env_0", "/World"):
+        if stage.GetPrimAtPath(f"{base}/Rack_0").IsValid():
+            return base
+    return None
+
+
+def _measure_rack(stage, base: str):
+    """Measure Rack_0 world bbox -> dict(floor, height, hx, hy) in meters, or None.
+
+    Uses default+render+proxy purposes (NVIDIA assets author geometry as 'render', which
+    a default-only BBoxCache silently skips) and ignores extentsHint to force real points.
+    """
+    from pxr import Usd, UsdGeom
+
+    cache = UsdGeom.BBoxCache(
+        Usd.TimeCode.Default(),
+        [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy],
+        useExtentsHint=False,
+    )
+    prim = stage.GetPrimAtPath(f"{base}/Rack_0")
+    if not prim.IsValid():
+        return None
+    rng = cache.ComputeWorldBound(prim).ComputeAlignedRange()
+    if rng.IsEmpty():
+        return None
+    mn, mx = rng.GetMin(), rng.GetMax()
+    return {
+        "floor": mn[2],
+        "height": mx[2] - mn[2],
+        "hx": (mx[0] - mn[0]) / 2.0,
+        "hy": (mx[1] - mn[1]) / 2.0,
+    }
+
+
+def _shelf_levels(height: float) -> list[float]:
+    """Shelf heights (relative to floor) spaced to fit the largest box, bottom -> top."""
+    spacing = BOX_LARGE_SIZE + SHELF_HEADROOM
+    n = max(2, int(height / spacing))
+    levels = [i * spacing for i in range(n)]
+    # keep only levels where the largest box still fits under the rack top
+    return [z for z in levels if z + BOX_LARGE_SIZE <= height + 1e-6] or [0.0]
+
+
+def _translate_op(prim):
+    """Return the prim's existing translate XformOp (AssetBaseCfg always sets one first)."""
+    from pxr import UsdGeom
+
+    xform = UsdGeom.Xformable(prim)
+    for op in xform.GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+            return op
+    return xform.AddTranslateOp()
+
+
+def _jitter(rng, half: float, size: float) -> float:
+    """Random offset within a shelf so boxes aren't dead-center (stays on the board)."""
+    limit = max(0.0, min(XY_JITTER_FRAC * half, half - size / 2.0 - 0.02))
+    return rng.uniform(-limit, limit)
+
+
+def _place_boxes(stage, base: str):
+    """Position the scene's 18 boxes + spawn extras onto computed shelf levels.
+
+    Returns (placed_rows, info) for logging.
+    """
+    from pxr import Gf
+
+    rng = random.Random(args_cli.seed)
+
+    # --- rack geometry: height drives shelves, X/Y come from RACK_POSITIONS ---
+    if args_cli.rack_height > 0.0:
+        floor, height = 0.0, args_cli.rack_height
+        hx = hy = DEFAULT_FOOT_HALF
+        source = "forced"
+    else:
+        m = _measure_rack(stage, base)
+        if m and MIN_RACK_HEIGHT < m["height"] < MAX_RACK_HEIGHT:
+            floor, height = m["floor"], m["height"]
+            hx, hy = min(m["hx"], 2.0), min(m["hy"], 2.0)
+            source = "measured"
+        else:
+            floor, height = 0.0, DEFAULT_RACK_HEIGHT
+            hx = hy = DEFAULT_FOOT_HALF
+            source = "default"
+
+    levels = _shelf_levels(height)
+    info = {"source": source, "floor": floor, "height": height, "hx": hx, "hy": hy, "levels": levels}
+
+    def _slot(size: float):
+        """Pick a random rack + shelf + jittered pose for a box of this size."""
+        ri = rng.randrange(len(RACK_POSITIONS))
+        rx, ry, _ = RACK_POSITIONS[ri]
+        level = rng.choice(levels)
+        x = rx + _jitter(rng, hx, size)
+        y = ry + _jitter(rng, hy, size)
+        z = floor + level + size / 2.0 + BOX_CLEARANCE   # cube origin centered -> bottom on shelf
+        return ri, level, x, y, z
+
+    placed: list[tuple[str, float, int, float, float]] = []
+
+    # 1) reposition the scene's existing 18 boxes (modify their translate op in place)
+    for name, size, _pos in ITEM_SPECS:
+        prim = stage.GetPrimAtPath(f"{base}/{name}")
+        if not prim.IsValid():
+            print(f"[WARN] box prim missing: {base}/{name}")
+            continue
+        ri, level, x, y, z = _slot(size)
+        _translate_op(prim).Set(Gf.Vec3d(x, y, z))
+        placed.append((name, size, ri, level, z))
+
+    # 2) spawn extra boxes (pass translation to func so xform order stays translate-first)
+    for k in range(max(0, args_cli.extra_boxes)):
+        size = rng.choice(SIZES)
+        ri, level, x, y, z = _slot(size)
+        cfg = sim_utils.UsdFileCfg(usd_path=BOX_USD[size], scale=(0.01, 0.01, 0.01))
+        cfg.func(f"{base}/extra_box_{k}", cfg, translation=(x, y, z))
+        placed.append((f"extra_box_{k}", size, ri, level, z))
+
+    return placed, info
+
+
+def _print_summary(placed, info) -> None:
+    """Print rack metrics, shelf levels, and a sample of box placements."""
+    print("=" * 70)
+    print(f"Rack height source : {info['source']}  (height={info['height']:.3f} m, floor={info['floor']:.3f} m)")
+    print(f"Shelf levels (rel) : {[round(z, 3) for z in info['levels']]}  -> {len(info['levels'])} shelves")
+    print(f"Box sizes (m)      : small={BOX_SMALL_SIZE} medium={BOX_MED_SIZE} large={BOX_LARGE_SIZE}")
+    print(f"Total boxes placed : {len(placed)}  (18 scene + {max(0, args_cli.extra_boxes)} extra, seed={args_cli.seed})")
+    top_abs = info["floor"] + (info["levels"][-1] if info["levels"] else 0.0) + BOX_LARGE_SIZE
+    print(f">>> RL env hint: set RACK_SHELF_Z ~= {info['floor'] + info['levels'][-1]:.3f} m (top shelf); env now: {RACK_SHELF_Z} m")
+    print(f"Sample placements  (showing first 8):")
+    for name, size, ri, level, z in placed[:8]:
+        print(f"  {name:14s} size={size:.2f}m -> Rack_{ri:<2d} shelf_rel={level:.3f} box_z={z:.3f}")
+    print("=" * 70)
+    print(f"[CHECK] All box_z are between {info['floor']:.2f} and {top_abs:.2f} m — none should float above the rack.")
+    print("=" * 70)
 
 
 def main() -> None:
-    """Load warehouse scene, run simulation loop for visual inspection."""
+    """Load warehouse scene, place boxes on shelves, run sim loop for inspection."""
     sim_cfg = sim_utils.SimulationCfg(dt=0.005, render_interval=1)
     sim = SimulationContext(sim_cfg)
     sim.set_camera_view(eye=(0.0, -15.0, 12.0), target=(0.0, 3.0, 1.0))
@@ -77,7 +223,18 @@ def main() -> None:
     sim.reset()
     scene.reset()
 
-    _print_layout_summary()
+    import omni.usd
+
+    stage = omni.usd.get_context().get_stage()
+    base = _resolve_env_base(stage)
+    if base is None:
+        print("[WARN] Could not locate Rack_0 prim — skipping box placement.")
+        placed, info = [], {"source": "none", "floor": 0.0, "height": 0.0, "hx": 0.0, "hy": 0.0, "levels": []}
+    else:
+        placed, info = _place_boxes(stage, base)
+
+    if info["levels"]:
+        _print_summary(placed, info)
     print("[INFO] Scene loaded. Inspect in viewport. Close window to exit.")
 
     step = 0

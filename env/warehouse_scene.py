@@ -59,7 +59,7 @@ def _usd(rel: str) -> str:
     return str(ASSETS_DIR / rel).replace("\\", "/")
 
 
-RACK_USD = _usd("Shelving/Racks/Rack_A/Rack_A01_PR_NVD_01.usd")
+RACK_USD = _usd("Shelving/Racks/Rack_L/Rack_L01_PR_NVD_01.usd")
 
 # Item box sizes (meters) — size encodes category for CLIP perception.
 BOX_SMALL_SIZE = 0.21  # fragile
@@ -180,7 +180,7 @@ def _wall_cfg(name: str, pos: tuple, size: tuple) -> AssetBaseCfg:
 
 
 def _rack_cfg(idx: int, pos: tuple) -> AssetBaseCfg:
-    """Static Rack_A01 USD (cm-authored -> scale 0.01 -> 2 m rack in sim)."""
+    """Static Rack_L01 USD (cm-authored -> scale 0.01; verify height via explore_rack.py)."""
     return AssetBaseCfg(
         prim_path=f"{{ENV_REGEX_NS}}/Rack_{idx}",
         spawn=sim_utils.UsdFileCfg(

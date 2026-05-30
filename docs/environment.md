@@ -85,10 +85,10 @@ Walls: primitive concrete cuboids (building shell USD deferred — SubUSDs 1.2GB
 | Racks per island | 2 (side by side along X) |
 | Total racks | 18 |
 | ISLAND_RACK_DX | 1.5 m (tune after explore_rack.py — must > rack footprint_x) |
-| Rack USD | Rack_A01_PR_NVD_01.usd (self-contained, 2.1MB) |
+| Rack USD | Rack_L01_PR_NVD_01.usd (27MB; external MDL not copied -> pink/default material, non-fatal) |
 | Rack scale | (0.01, 0.01, 0.01) — NVIDIA DT assets authored in cm, no auto-convert in Isaac Lab |
-| Rack sim height | ~2.0 m |
-| RACK_SHELF_Z | 1.5 m (measured: 75% of 2.0m rack) |
+| Rack sim height | TBD — run explore_rack.py (was ~2.0m for old Rack_A) |
+| RACK_SHELF_Z | 1.5 m — RETUNE after explore_rack.py (carried over from Rack_A) |
 
 ### Items (Visual Landmarks)
 

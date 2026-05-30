@@ -32,6 +32,9 @@ Run (PowerShell), copying the *containing folder* so self-contained material/tex
 ```powershell
 $src = "C:\Users\Henry\Downloads\Warehouse_NVD@10013\Assets\DigitalTwin\Assets\Warehouse"
 $dst = "C:\Users\Henry\Documents\KULIAH\sem_4\BANTAI_FP\assets"
+# Rack: copy only L01 (folder has 18 variants ~700MB; we use one)
+New-Item -ItemType Directory -Force "$dst\Shelving\Racks\Rack_L" | Out-Null
+Copy-Item "$src\Shelving\Racks\Rack_L\Rack_L01_PR_NVD_01.usd" "$dst\Shelving\Racks\Rack_L\" -Force
 Copy-Item "$src\Equipment\Forklifts\Forklift_A" "$dst\Equipment\Forklifts\Forklift_A" -Recurse -Force
 Copy-Item "$src\Shipping\Cardboard_Boxes_on_Pallet\Pallet_Asm_A" "$dst\Shipping\Cardboard_Boxes_on_Pallet\Pallet_Asm_A" -Recurse -Force
 Copy-Item "$src\Shipping\Pallets\Plastic\Economy_A" "$dst\Shipping\Pallets\Plastic\Economy_A" -Recurse -Force

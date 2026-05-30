@@ -2,6 +2,8 @@
 # Source: C:\Users\Henry\Downloads\Warehouse_NVD@10013\Assets\DigitalTwin\Assets\Warehouse
 # Copy commands: docs/superpowers/plans/2026-05-30-warehouse-layout-v2.md Task 1
 assets/
+# Archives (e.g. assets.zip 467MB — exceeds GitHub 100MB limit)
+*.zip
 
 # ── Python ────────────────────────────────────────────────────────────
 __pycache__/

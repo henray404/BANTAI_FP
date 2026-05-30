@@ -1,6 +1,6 @@
 # explore_rack.py
 # Entry script — AppLauncher lives here.
-# Loads Rack_A01 USD standalone, prints bounding box to determine RACK_SHELF_Z.
+# Loads Rack_L01 USD standalone, prints bounding box to determine RACK_SHELF_Z.
 #
 # Workflow:
 #   1. Run this script (windowed). Look at rack in viewport.
@@ -12,7 +12,7 @@
 #   conda activate isaaclab
 #   python asset_sandbox/scripts/explore_rack.py
 
-"""Rack_A01 standalone viewer: prints bounding box Z for RACK_SHELF_Z tuning."""
+"""Rack_L01 standalone viewer: prints bounding box Z for RACK_SHELF_Z tuning."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from pathlib import Path
 from isaaclab.app import AppLauncher
 
 # ── CLI + AppLauncher ─────────────────────────────────────────────────
-parser = argparse.ArgumentParser(description="Rack_A01 USD viewer")
+parser = argparse.ArgumentParser(description="Rack_L01 USD viewer")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -55,7 +55,7 @@ def _print_rack_bounds(prim_path: str) -> None:
         bbox = bbox_cache.ComputeWorldBound(prim)
         box = bbox.GetBox()
         mn, mx = box.GetMin(), box.GetMax()
-        meters_per_unit = 0.01  # Rack_A01 authored in cm; BBoxCache returns USD units
+        meters_per_unit = 0.01  # Rack_L01 authored in cm; BBoxCache returns USD units
         min_x_m, max_x_m = mn[0] * meters_per_unit, mx[0] * meters_per_unit
         min_y_m, max_y_m = mn[1] * meters_per_unit, mx[1] * meters_per_unit
         min_z_m, max_z_m = mn[2] * meters_per_unit, mx[2] * meters_per_unit
