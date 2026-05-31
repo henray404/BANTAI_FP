@@ -139,6 +139,7 @@ RACK_SHELF_Z = 1.5
 ITEM_SPECS = _item_specs_gen(
     RACK_POSITIONS,
     (BOX_SMALL_SIZE, BOX_MED_SIZE, BOX_LARGE_SIZE),
+    BOX_MASSES,
     RACK_SHELF_Z,
 )
 
@@ -295,7 +296,14 @@ class WarehouseSceneCfg(InteractiveSceneCfg):
         """
         for i, pos in enumerate(RACK_POSITIONS):
             setattr(self, f"rack_{i}", _rack_cfg(i, pos))
+        for name, size, mass, pos in ITEM_SPECS:
+            setattr(self, name, _item_cfg(name, size, mass, pos))
+        for name, usd_path, pos in PROP_SPECS:
+            setattr(self, name, _prop_cfg(name, usd_path, pos))
+(self, name, _prop_cfg(name, usd_path, pos))
+ setattr(self, f"rack_{i}", _rack_cfg(i, pos))
         for name, size, pos in ITEM_SPECS:
             setattr(self, name, _item_cfg(name, size, pos))
         for name, usd_path, pos in PROP_SPECS:
             setattr(self, name, _prop_cfg(name, usd_path, pos))
+(self, name, _prop_cfg(name, usd_path, pos))
