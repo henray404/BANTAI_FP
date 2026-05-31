@@ -300,10 +300,3 @@ class WarehouseSceneCfg(InteractiveSceneCfg):
             setattr(self, name, _item_cfg(name, size, mass, pos))
         for name, usd_path, pos in PROP_SPECS:
             setattr(self, name, _prop_cfg(name, usd_path, pos))
-(self, name, _prop_cfg(name, usd_path, pos))
- setattr(self, f"rack_{i}", _rack_cfg(i, pos))
-        for name, size, pos in ITEM_SPECS:
-            setattr(self, name, _item_cfg(name, size, pos))
-        for name, usd_path, pos in PROP_SPECS:
-            setattr(self, name, _prop_cfg(name, usd_path, pos))
-(self, name, _prop_cfg(name, usd_path, pos))
