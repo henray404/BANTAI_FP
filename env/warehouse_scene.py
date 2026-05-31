@@ -65,6 +65,7 @@ RACK_USD = _usd("Shelving/Racks/Rack_L/Rack_L01_PR_NVD_01.usd")
 BOX_SMALL_SIZE = 0.21  # fragile
 BOX_MED_SIZE   = 0.32  # regular
 BOX_LARGE_SIZE = 0.52  # heavy
+BOX_MASSES     = (2.0, 6.0, 12.0)  # fragile, regular, heavy
 
 BOX_USD = {
     BOX_SMALL_SIZE: _usd("Shipping/Cardboard_Boxes/Cube_A/CubeBox_A03_21cm_PR_NVD_01.usd"),
