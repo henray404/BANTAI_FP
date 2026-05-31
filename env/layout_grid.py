@@ -28,19 +28,22 @@ def island_rack_positions(
 def item_specs(
     rack_positions: list[tuple[float, float, float]],
     sizes: tuple[float, float, float],
+    masses: tuple[float, float, float],
     shelf_z: float,
-) -> list[tuple[str, float, tuple[float, float, float]]]:
+) -> list[tuple[str, float, float, tuple[float, float, float]]]:
     """One box per rack, cycling category by index (fragile/regular/heavy).
 
     sizes = (fragile_m, regular_m, heavy_m) edge lengths in meters.
-    Returns list of (name, size, (x, y, shelf_z + size/2)).
+    masses = (fragile_kg, regular_kg, heavy_kg) weights in kg.
+    Returns list of (name, size, mass, (x, y, shelf_z + size/2)).
     """
     counters = {c: 0 for c in _CATEGORIES}
-    out: list[tuple[str, float, tuple[float, float, float]]] = []
+    out: list[tuple[str, float, float, tuple[float, float, float]]] = []
     for i, (x, y, _z) in enumerate(rack_positions):
         cat = _CATEGORIES[i % 3]
         size = sizes[i % 3]
+        mass = masses[i % 3]
         name = f"{cat}_{counters[cat]}"
         counters[cat] += 1
-        out.append((name, size, (x, y, shelf_z + size / 2.0)))
+        out.append((name, size, mass, (x, y, shelf_z + size / 2.0)))
     return out

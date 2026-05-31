@@ -19,16 +19,20 @@ def test_island_rack_offsets():
 
 def test_item_specs_count_and_cycle():
     racks = island_rack_positions((-6.0, 0.0, 6.0), (8.0, 1.0, -5.0), 1.5)
-    items = item_specs(racks, (0.21, 0.32, 0.52), 1.5)
+    items = item_specs(racks, (0.21, 0.32, 0.52), (2.0, 6.0, 12.0), 1.5)
     assert len(items) == 18
     assert items[0][0] == "fragile_0"
+    assert items[0][2] == 2.0  # mass
     assert items[1][0] == "regular_0"
+    assert items[1][2] == 6.0
     assert items[2][0] == "heavy_0"
+    assert items[2][2] == 12.0
     assert items[3][0] == "fragile_1"
 
 
 def test_item_z_sits_on_shelf():
-    items = item_specs([(0.0, 0.0, 0.0)], (0.21, 0.32, 0.52), 1.5)
-    name, size, pos = items[0]
+    items = item_specs([(0.0, 0.0, 0.0)], (0.21, 0.32, 0.52), (2.0, 6.0, 12.0), 1.5)
+    name, size, mass, pos = items[0]
     assert size == 0.21
+    assert mass == 2.0
     assert abs(pos[2] - (1.5 + 0.105)) < 1e-9
