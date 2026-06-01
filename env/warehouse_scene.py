@@ -27,6 +27,7 @@ Room: 20 x 30 m (x in [-10,+10], y in [-15,+15]).
     SOUTH WALL  (y = -15)
 
 9 islands (3x3), 2 racks each = 18 racks total.
+54 boxes: 18 racks × 3 shelf levels, category cycles fragile/regular/heavy per rack.
 Category encoding:
     fragile = CubeBox 21 cm   zone_A (orange)
     regular = CubeBox 32 cm   zone_B (cyan)
@@ -41,13 +42,13 @@ from pathlib import Path
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import TiledCameraCfg
+from isaaclab.sensors import ContactSensorCfg, TiledCameraCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-from env.layout_grid import island_rack_positions, item_specs as _item_specs_gen
+from env.layout_grid import island_rack_positions
 
 
 # ── Asset Paths ───────────────────────────────────────────────────────
@@ -92,23 +93,72 @@ SIGN_USD   = _usd("Safety/Floor_Signs/Warning_A/WarningSign_A01_PR_NVD_01.usd")
 
 
 # ── Robot Config ──────────────────────────────────────────────────────
-JETBOT_CFG = ArticulationCfg(
+# Ridgeback-Franka mobile manipulator: Clearpath Ridgeback (holonomic base) + Franka Panda
+# 7-DOF arm + 2-finger gripper. Single pre-rigged articulation on the Isaac 5.1 server
+# (HTTP 200 verified). Values mirror Isaac Lab's shipped RIDGEBACK_FRANKA_PANDA_CFG, with two
+# project overrides: activate_contact_sensors=True (shipped False — collision sensor needs it)
+# and raised solver iters for arm/contact stability. See docs/.../2026-06-01-arm-pickup-design.md.
+#
+# Base is HOLONOMIC via 3 dummy joints (prismatic_x/y + revolute_z), velocity-controlled.
+# Driven diff-drive-style from a (2,) action (see warehouse_env.ActionsCfg / _base_cmd) so the
+# obs/action contract is unchanged. Arm + gripper hold their tucked init pose (position control);
+# the pickup state machine will script them later.
+# VERIFY on first run: base chassis BODY name (contact sensor) + dummy-joint chain frame
+# (if the base drives in a fixed world direction regardless of heading, _base_cmd must project
+# by yaw — see its comment).
+RIDGEBACK_FRANKA_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path=f"{ISAAC_NUCLEUS_DIR}/Robots/NVIDIA/Jetbot/jetbot.usd",
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            max_depenetration_velocity=5.0,
+        usd_path=f"{ISAAC_NUCLEUS_DIR}/Robots/Clearpath/RidgebackFranka/ridgeback_franka.usd",
+        activate_contact_sensors=True,
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=False,
+            solver_position_iteration_count=12,
+            solver_velocity_iteration_count=1,
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.05),
+        joint_pos={
+            # holonomic base (planar floating joint)
+            "dummy_base_prismatic_y_joint": 0.0,
+            "dummy_base_prismatic_x_joint": 0.0,
+            "dummy_base_revolute_z_joint": 0.0,
+            # franka arm — tucked/ready pose
+            "panda_joint1": 0.0,
+            "panda_joint2": -0.569,
+            "panda_joint3": 0.0,
+            "panda_joint4": -2.810,
+            "panda_joint5": 0.0,
+            "panda_joint6": 2.0,
+            "panda_joint7": 0.741,
+            # gripper open
+            "panda_finger_joint.*": 0.035,
+        },
+        joint_vel={".*": 0.0},
     ),
     actuators={
-        "wheel_acts": ImplicitActuatorCfg(
-            joint_names_expr=[".*"],
-            damping=None,
-            stiffness=None,
-            effort_limit_sim=100.0,
-            velocity_limit_sim=50.0,
+        "base": ImplicitActuatorCfg(
+            joint_names_expr=["dummy_base_.*"],
+            effort_limit_sim=1000.0,
+            stiffness=0.0,
+            damping=1e5,
+        ),
+        "panda_shoulder": ImplicitActuatorCfg(
+            joint_names_expr=["panda_joint[1-4]"],
+            effort_limit_sim=87.0,
+            stiffness=800.0,
+            damping=40.0,
+        ),
+        "panda_forearm": ImplicitActuatorCfg(
+            joint_names_expr=["panda_joint[5-7]"],
+            effort_limit_sim=12.0,
+            stiffness=800.0,
+            damping=40.0,
+        ),
+        "panda_hand": ImplicitActuatorCfg(
+            joint_names_expr=["panda_finger_joint.*"],
+            effort_limit_sim=200.0,
+            stiffness=1e5,
+            damping=1e3,
         ),
     },
 )
@@ -132,17 +182,38 @@ ISLAND_RACK_DX = 1.5
 
 RACK_POSITIONS = island_rack_positions(ISLAND_COLS_X, ISLAND_ROWS_Y, ISLAND_RACK_DX)
 
-# RACK_SHELF_Z: measured 2026-05-30 via explore_rack.py.
-#   raw bbox max_z = 199.902 (USD cm units) -> 199.902 * 0.01 = ~2.0 m rack in sim.
-#   top shelf @ 75%: 149.93 * 0.01 = 1.5 m
-RACK_SHELF_Z = 1.5
+# Hardcoded shelf deck levels (top surface z, meters).
+# Rack height ~2.0m (measured 2026-05-30). 3 evenly-spaced levels.
+# Solid CuboidCfg shelf decks are spawned at these heights via _shelf_deck_cfg().
+# Boxes fall from z=2.8m and land on the top deck (RACK_SHELF_LEVELS[-1]).
+# Tune these values if boxes miss the deck: RACK_SHELF_LEVELS[2] should match actual top shelf.
+RACK_SHELF_LEVELS = (0.72351, 1.32528, 1.92566)  # measured shelf surface z (bottom/mid/top)
 
-ITEM_SPECS = _item_specs_gen(
-    RACK_POSITIONS,
-    (BOX_SMALL_SIZE, BOX_MED_SIZE, BOX_LARGE_SIZE),
-    BOX_MASSES,
-    RACK_SHELF_Z,
-)
+# Shelf deck geometry — covers interior of rack frame without hitting uprights.
+# 0.70m × 0.70m square = orientation-agnostic (rack long axis unknown without USD inspection).
+SHELF_DECK_SIZE = (0.70, 0.70, 0.02)     # (width_x, depth_y, thickness_z) in meters
+
+RACK_SHELF_Z = RACK_SHELF_LEVELS[-1]     # top shelf z (kept for explore_scene hint)
+
+# 54 boxes: 18 racks × 3 shelf levels.
+# Category per slot = (rack_idx + level_idx) % 3 → each rack gets all 3 types, one per level.
+# Example rack 0: level 0=fragile, level 1=regular, level 2=heavy.
+#          rack 1: level 0=regular, level 1=heavy,   level 2=fragile.  (rotated)
+_BOX_CATS   = ("fragile", "regular", "heavy")
+_BOX_SIZES  = (BOX_SMALL_SIZE, BOX_MED_SIZE, BOX_LARGE_SIZE)
+_BOX_MASSES = BOX_MASSES
+
+ITEM_SPECS: list[tuple[str, float, float, tuple[float, float, float]]] = []
+_cat_cnt = {"fragile": 0, "regular": 0, "heavy": 0}
+for _i, (_rx, _ry, _) in enumerate(RACK_POSITIONS):
+    for _j, _sz in enumerate(RACK_SHELF_LEVELS):
+        _ci   = (_i + _j) % 3
+        _cat  = _BOX_CATS[_ci]
+        _size = _BOX_SIZES[_ci]
+        _mass = _BOX_MASSES[_ci]
+        _name = f"{_cat}_{_cat_cnt[_cat]}_l{_j}"
+        _cat_cnt[_cat] += 1
+        ITEM_SPECS.append((_name, _size, _mass, (_rx, _ry, _sz + _size / 2.0)))
 
 ZONE_SIZE  = (3.0, 3.0, 0.02)
 ZONE_SPECS = [
@@ -194,16 +265,58 @@ def _rack_cfg(idx: int, pos: tuple) -> AssetBaseCfg:
     )
 
 
-def _item_cfg(name: str, size: float, pos: tuple) -> AssetBaseCfg:
-    """Static cardboard-box USD (size encodes category for CLIP; cm-authored -> scale 0.01)."""
+def _shelf_deck_cfg(rack_idx: int, level_idx: int, rack_pos: tuple, shelf_z: float) -> AssetBaseCfg:
+    """Static thin cuboid shelf deck — solid collision surface for boxes at shelf_z.
+
+    Top surface at shelf_z; platform center offset down by half-thickness.
+    3 decks per rack (RACK_SHELF_LEVELS) × 18 racks = 54 platforms total.
+    """
+    # Platform center z = shelf surface z - half thickness
+    pos = (rack_pos[0], rack_pos[1], shelf_z - SHELF_DECK_SIZE[2] / 2.0)
     return AssetBaseCfg(
-        prim_path=f"{{ENV_REGEX_NS}}/{name}",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=BOX_USD[size],
-            scale=(0.01, 0.01, 0.01),
+        prim_path=f"{{ENV_REGEX_NS}}/shelf_{rack_idx}_{level_idx}",
+        spawn=sim_utils.CuboidCfg(
+            size=SHELF_DECK_SIZE,
             collision_props=sim_utils.CollisionPropertiesCfg(),
+            # No visual_material: avoids SDP BindMaterialCommand that crashes Blackwell RTX 5050.
+            # See bugs_errors/2026-05-22_sdp-camera-crash-blackwell.md — 108 material nodes triggers it.
         ),
         init_state=AssetBaseCfg.InitialStateCfg(pos=pos),
+    )
+
+
+def _item_cfg(name: str, size: float, mass: float, pos: tuple) -> RigidObjectCfg:
+    """Rigid primitive cube — physics proxy for cardboard box.
+
+    Uses CuboidCfg instead of UsdFileCfg because NVIDIA DT cardboard box USDs
+    are visual-only assets (no RigidBodyAPI schema on root prim). RigidObjectCfg
+    with UsdFileCfg raises 'Failed to find a rigid body' at sim init.
+
+    Size (0.21/0.32/0.52m) encodes category for CLIP/YOLO.
+    Color differentiates category visually at 64x64 resolution.
+    BOX_USD paths are kept as constants for future use if assets gain RigidBodyAPI.
+    """
+    # Spawn 5cm above target shelf surface — falls onto shelf deck.
+    # pos[2] = shelf_z + size/2 (box center at rest); +0.05 gives clearance above deck.
+    raised_pos = (pos[0], pos[1], pos[2] + 0.05)
+    return RigidObjectCfg(
+        prim_path=f"{{ENV_REGEX_NS}}/{name}",
+        spawn=sim_utils.CuboidCfg(
+            size=(size, size, size),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                max_depenetration_velocity=1.0,
+                disable_gravity=False,
+            ),
+            mass_props=sim_utils.MassPropertiesCfg(mass=mass),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=0.005,
+                rest_offset=0.0,
+            ),
+            # No visual_material: 54 individual PreviewSurfaceCfg nodes trigger SDP crash on
+            # Blackwell RTX 5050 (omni.syntheticdata BindMaterialCommand overflow).
+            # Category differentiation via size (0.21/0.32/0.52m) — sufficient for YOLO/CLIP.
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=raised_pos),
     )
 
 
@@ -253,7 +366,7 @@ class WarehouseSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.DomeLightCfg(intensity=2500.0, color=(0.95, 0.95, 0.95)),
     )
 
-    robot: ArticulationCfg = JETBOT_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+    robot: ArticulationCfg = RIDGEBACK_FRANKA_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
     camera: TiledCameraCfg = TiledCameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/onboard_cam",
@@ -262,13 +375,13 @@ class WarehouseSceneCfg(InteractiveSceneCfg):
         width=64,
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0,
+            focal_length=18.0,          # 18mm → HFOV ~60° (was 24mm → 47°); matches RealSense D435
             focus_distance=400.0,
             horizontal_aperture=20.955,
             clipping_range=(0.05, 50.0),
         ),
         offset=TiledCameraCfg.OffsetCfg(
-            pos=(0.05, 0.0, 0.10),
+            pos=(0.35, 0.0, 0.55),      # front-top of Ridgeback base, forward-facing
             rot=(0.5, -0.5, 0.5, -0.5),
             convention="ros",
         ),
@@ -289,14 +402,29 @@ class WarehouseSceneCfg(InteractiveSceneCfg):
     zone_B = _zone_cfg(*ZONE_SPECS[1])
     zone_C = _zone_cfg(*ZONE_SPECS[2])
 
-    def __post_init__(self) -> None:
-        """Register 18 racks + 18 items + 11 props as scene attributes.
+    # Contact sensor on the Ridgeback base — required for collision penalty (Phase 3).
+    # VERIFY the base BODY name from the articulation-init log (explore_scene strips this
+    # sensor, so spawn the robot once and read "Body names: [...]"). "base_link" is the
+    # best guess for the Ridgeback chassis; fix here if the path fails to resolve.
+    contact_sensor: ContactSensorCfg = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/base_link",
+        update_period=0.0,
+        history_length=3,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/Rack_.*", "{ENV_REGEX_NS}/wall_.*"],
+    )
 
-        InteractiveSceneCfg picks up any AssetBaseCfg set on self after __post_init__.
-        Using setattr avoids declaring 47 explicit class-level attributes.
+    def __post_init__(self) -> None:
+        """Register racks + shelf decks + boxes + props as scene attributes.
+
+        - 18 racks (static USD)
+        - 54 shelf decks (18 racks × 3 levels, invisible CuboidCfg — solid collision surface)
+        - 54 boxes (RigidObjectCfg — gravity, each spawns 5cm above its target shelf deck)
+        - 11 props (static USD)
         """
-        for i, pos in enumerate(RACK_POSITIONS):
-            setattr(self, f"rack_{i}", _rack_cfg(i, pos))
+        for i, rack_pos in enumerate(RACK_POSITIONS):
+            setattr(self, f"rack_{i}", _rack_cfg(i, rack_pos))
+            for j, shelf_z in enumerate(RACK_SHELF_LEVELS):
+                setattr(self, f"shelf_{i}_{j}", _shelf_deck_cfg(i, j, rack_pos, shelf_z))
         for name, size, mass, pos in ITEM_SPECS:
             setattr(self, name, _item_cfg(name, size, mass, pos))
         for name, usd_path, pos in PROP_SPECS:

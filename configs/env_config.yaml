@@ -15,7 +15,7 @@
 #   - out_of_bounds: rectangular (x+-9.5, y+-14.5)
 
 env:
-  num_envs: 2
+  num_envs: 1   # 1 env: Ridgeback-Franka + 54 rigid boxes saturates 8GB RTX 5050
   env_spacing: 32.0         # must exceed 30m room + buffer
   episode_length_s: 60.0    # 60s x 10Hz = 600 steps
   decimation: 20            # 200Hz physics / 20 = 10Hz policy (DreamerNav std)
@@ -27,29 +27,38 @@ simulation:
   render_interval: 20
 
 robot:
-  type: "jetbot"
-  source: "ISAAC_NUCLEUS_DIR/Robots/NVIDIA/Jetbot/jetbot.usd"
-  wheel_base: 0.118
-  wheel_radius: 0.032
-  max_lin_speed: 1.0
-  max_ang_speed: 2.0
+  type: "carter_v1"
+  source: "ISAAC_NUCLEUS_DIR/Robots/NVIDIA/Carter/carter_v1.usd"
+  wheel_base: 0.413         # Carter v1 APPROXIMATE — verify on first run (carter_v2.4 not on Isaac 5.1 server)
+  wheel_radius: 0.100       # Carter v1 APPROXIMATE — verify on first run
+  max_lin_speed: 1.5        # m/s — Carter capable 2.0; 1.5 safe for training
+  max_ang_speed: 1.5        # rad/s
   action_scale: 1.0
-  init_pos: [0.0, 0.0, 0.05]
+  init_pos: [0.0, 0.0, 0.15]  # Carter sits 15cm off ground (was 5cm Jetbot)
   spawn_x: [-8.0, 8.0]     # receiving-north x range
   spawn_y: [11.0, 14.0]    # receiving-north y range
+  physics:
+    static_friction: 0.9
+    dynamic_friction: 0.7
+    restitution: 0.0
+    friction_combine_mode: "multiply"
+    max_depenetration_velocity: 1.0   # was 5.0 — lower prevents ghost-through
+    effort_limit: 20.0                # N·m (was 100.0 — nonsensical for any robot)
+    velocity_limit: 25.0              # rad/s
 
 observation:
   image_size: [64, 64]
   channels: 3
   goal_embedding_dim: 512
-  obs_keys: ["pixels", "position", "goal", "goal_emb"]
+  obs_keys: ["pixels", "position", "goal", "goal_emb", "heading"]
+  heading_dim: 2   # [cos(yaw), sin(yaw)] — added to fix random-spawn orientation blindness
 
 camera:
   prim_path_suffix: "/Robot/onboard_cam"
   update_period: 0.1
-  focal_length: 24.0
+  focal_length: 18.0          # was 24.0; 18mm → HFOV ~60° (was 47°); matches RealSense D435
   horizontal_aperture: 20.955
-  offset_pos: [0.05, 0.0, 0.10]
+  offset_pos: [0.15, 0.0, 0.50]   # was [0.05, 0.0, 0.10]; 50cm height on Carter
   offset_rot: [0.5, -0.5, 0.5, -0.5]
   data_types: ["rgb"]
   note: "TiledCameraCfg only - CameraCfg crashes on RTX 5050 Blackwell"
@@ -59,13 +68,14 @@ action:
   axes: ["linear_vel", "angular_vel"]
 
 reward:
-  delivery_success: 1.0
-  shaping_weight: 0.05
-  time_penalty: -0.001
-  goal_threshold: 0.5
+  delivery_success: 10.0      # was 1.0 — raised to balance against shaping scale
+  shaping_weight: -0.01       # was +0.05 (with negative func); now sign in weight, func returns +dist
+  time_penalty: -0.005        # was -0.001
+  collision_penalty: 5.0      # new — func returns 0/-1; effective=-5 per collision step
+  goal_threshold: 1.5         # was 0.5m — now matches zone edge (3x3m zone → ±1.5m)
 
 termination:
-  goal_reached_threshold: 0.5
+  goal_reached_threshold: 1.5  # was 0.5m — matches reward goal_threshold
   out_of_bounds_half_extent_x: 9.5
   out_of_bounds_half_extent_y: 14.5
 

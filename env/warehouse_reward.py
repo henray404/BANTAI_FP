@@ -13,6 +13,7 @@ import torch
 from isaaclab.assets import Articulation
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.sensors import ContactSensor
 
 
 def _robot_xy(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -34,9 +35,12 @@ def _current_goal_xy(env: ManagerBasedRLEnv) -> torch.Tensor:
 def delivery_success(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    threshold: float = 0.5,
+    threshold: float = 1.5,
 ) -> torch.Tensor:
-    """+1 per step while robot xy is within `threshold` of current goal xy."""
+    """+1 per step while robot xy is within `threshold` of current goal xy.
+
+    threshold=1.5m matches zone edge (3x3m zone → ±1.5m from center).
+    """
     dist = torch.norm(_robot_xy(env, asset_cfg) - _current_goal_xy(env), dim=-1)
     return (dist < threshold).float()
 
@@ -45,8 +49,8 @@ def distance_to_goal(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Negative shaping reward: -distance(robot, goal). Encourages approach."""
-    return -torch.norm(_robot_xy(env, asset_cfg) - _current_goal_xy(env), dim=-1)
+    """Positive distance(robot, goal). Use with negative weight in RewardsCfg for shaping."""
+    return torch.norm(_robot_xy(env, asset_cfg) - _current_goal_xy(env), dim=-1)
 
 
 def time_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
@@ -57,11 +61,26 @@ def time_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
 def reached_goal(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    threshold: float = 0.5,
+    threshold: float = 1.5,
 ) -> torch.Tensor:
     """Termination: True once robot xy is within threshold of goal xy."""
     dist = torch.norm(_robot_xy(env, asset_cfg) - _current_goal_xy(env), dim=-1)
     return dist < threshold
+
+
+def collision_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_sensor"),
+    threshold_n: float = 5.0,
+) -> torch.Tensor:
+    """Returns -1.0 for envs with net contact force above threshold_n Newtons, else 0.
+
+    Use with positive weight in RewardsCfg (e.g. weight=5.0 → effective penalty=-5 per step).
+    Requires ContactSensorCfg on Robot chassis (see warehouse_scene.py).
+    """
+    sensor: ContactSensor = env.scene[sensor_cfg.name]
+    net_force = sensor.data.net_forces_w_history[:, 0, :].norm(dim=-1)
+    return -(net_force > threshold_n).float()
 
 
 def out_of_bounds(

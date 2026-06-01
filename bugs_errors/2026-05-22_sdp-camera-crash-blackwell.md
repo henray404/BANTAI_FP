@@ -43,3 +43,30 @@ Sensor data format difference:
 - TiledCameraCfg: data.output["rgb"] -> Tensor(B, H, W, 3) float32 [0, 1] RGB
 
 camera_rgb() in warehouse_env.py handles both via dtype check.
+
+## Update 2026-06-01: TiledCamera does NOT bypass SDP on Isaac Sim 5.1
+
+The "bypasses SDP OmniGraph entirely" claim above is FALSE on Isaac Sim 5.1.
+`explore_scene.py` crashed with the identical signature
+(`state:_sdp_intergraph_downstream_node_handles_`, access violation, ~36 s uptime).
+
+Log evidence: crash fires on the line immediately after
+`XFormPrimView over '.../Robot/onboard_cam'` — i.e. during TiledCamera init, not the
+human viewport. (`--headless` did not help before, confirming the sensor camera — not the
+viewport — is the trigger.) BAR1 VRAM was near-exhausted (8164/8192 MiB), which aggravates
+the SDP allocation crash on the 8 GB RTX 5050.
+
+### Workaround for explore_scene.py (visual inspection only)
+That script never reads camera tensors, so it strips the sensors before scene build:
+```python
+scene_cfg.camera = None
+scene_cfg.contact_sensor = None
+```
+No camera prim -> no SDP graph -> no crash. (`enable_cameras` left off.)
+
+### OPEN: RL env (warehouse_env.py / run_env.py) still affected
+The RL env REQUIRES the camera for `obs["pixels"]`, so it cannot strip it. It will hit this
+same SDP crash on Blackwell. Real fix still needed — candidates to try:
+- newer NVIDIA driver / Isaac Sim patch for Blackwell SDP
+- reduce VRAM pressure (fewer envs, smaller tiled-camera resolution already 64x64)
+- alternative RGB capture path that avoids the replicator/SDP annotator graph

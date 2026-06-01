@@ -31,11 +31,11 @@ from isaaclab.app import AppLauncher
 # ── CLI + AppLauncher ─────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Warehouse scene layout viewer")
 parser.add_argument("--seed", type=int, default=42, help="RNG seed for random box placement")
-parser.add_argument("--extra-boxes", type=int, default=40, help="extra boxes to spawn on top of the scene's 18")
 parser.add_argument("--rack-height", type=float, default=0.0, help="force rack height in meters (0 = auto-measure)")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
-args_cli.enable_cameras = True  # TiledCamera requires this flag
+# No enable_cameras: the onboard TiledCamera is stripped in main() (it is irrelevant to a
+# visual layout check, and its SDP graph access-violates on Blackwell at init).
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -52,7 +52,6 @@ from env.warehouse_scene import (
     BOX_LARGE_SIZE,
     BOX_MED_SIZE,
     BOX_SMALL_SIZE,
-    BOX_USD,
     ITEM_SPECS,
     RACK_POSITIONS,
     RACK_SHELF_Z,
@@ -68,7 +67,6 @@ MIN_RACK_HEIGHT     = 0.30    # m, plausibility bounds for a measured rack
 MAX_RACK_HEIGHT     = 6.00    # m
 XY_JITTER_FRAC      = 0.35    # random X/Y offset as fraction of rack half-footprint
 
-SIZES = (BOX_SMALL_SIZE, BOX_MED_SIZE, BOX_LARGE_SIZE)
 
 
 def _resolve_env_base(stage) -> str | None:
@@ -173,23 +171,13 @@ def _place_boxes(stage, base: str):
 
     placed: list[tuple[str, float, int, float, float]] = []
 
-    # 1) reposition the scene's existing 18 boxes (modify their translate op in place)
-    for name, size, _pos in ITEM_SPECS:
-        prim = stage.GetPrimAtPath(f"{base}/{name}")
-        if not prim.IsValid():
-            print(f"[WARN] box prim missing: {base}/{name}")
-            continue
+    # 1) Scene's 18 boxes are RigidObjectCfg — PhysX body state is separate from USD prim
+    # state after sim.reset(). _translate_op.Set() only moves the USD prim, NOT the physics
+    # body. Boxes are placed by physics: spawned at z=2.8m and fall to first surface.
+    # Log computed shelf slots for summary only; actual positions set by gravity.
+    for name, size, _mass, _pos in ITEM_SPECS:
         ri, level, x, y, z = _slot(size)
-        _translate_op(prim).Set(Gf.Vec3d(x, y, z))
         placed.append((name, size, ri, level, z))
-
-    # 2) spawn extra boxes (pass translation to func so xform order stays translate-first)
-    for k in range(max(0, args_cli.extra_boxes)):
-        size = rng.choice(SIZES)
-        ri, level, x, y, z = _slot(size)
-        cfg = sim_utils.UsdFileCfg(usd_path=BOX_USD[size], scale=(0.01, 0.01, 0.01))
-        cfg.func(f"{base}/extra_box_{k}", cfg, translation=(x, y, z))
-        placed.append((f"extra_box_{k}", size, ri, level, z))
 
     return placed, info
 
@@ -200,7 +188,7 @@ def _print_summary(placed, info) -> None:
     print(f"Rack height source : {info['source']}  (height={info['height']:.3f} m, floor={info['floor']:.3f} m)")
     print(f"Shelf levels (rel) : {[round(z, 3) for z in info['levels']]}  -> {len(info['levels'])} shelves")
     print(f"Box sizes (m)      : small={BOX_SMALL_SIZE} medium={BOX_MED_SIZE} large={BOX_LARGE_SIZE}")
-    print(f"Total boxes placed : {len(placed)}  (18 scene + {max(0, args_cli.extra_boxes)} extra, seed={args_cli.seed})")
+    print(f"Total boxes placed : {len(placed)}  (54 scene boxes: 18 racks × 3 shelf levels, seed={args_cli.seed})")
     top_abs = info["floor"] + (info["levels"][-1] if info["levels"] else 0.0) + BOX_LARGE_SIZE
     print(f">>> RL env hint: set RACK_SHELF_Z ~= {info['floor'] + info['levels'][-1]:.3f} m (top shelf); env now: {RACK_SHELF_Z} m")
     print(f"Sample placements  (showing first 8):")
@@ -218,10 +206,25 @@ def main() -> None:
     sim.set_camera_view(eye=(0.0, -15.0, 12.0), target=(0.0, 3.0, 1.0))
 
     scene_cfg = WarehouseSceneCfg(num_envs=1, env_spacing=22.0)
+    # Strip onboard camera + contact sensor before build: neither is needed to eyeball the
+    # layout, and TiledCamera's SDP intergraph access-violates at init on Blackwell (RTX 5050).
+    # See bugs_errors/2026-05-22_sdp-camera-crash-blackwell.md.
+    scene_cfg.camera = None
+    scene_cfg.contact_sensor = None
     scene = InteractiveScene(scene_cfg)
 
     sim.reset()
     scene.reset()
+
+    # Step physics for 2 seconds so rigid boxes fall from z=2.8m and settle on shelves/floor
+    # before the layout is inspected or extra boxes are spawned.
+    # 2.0s / 0.005s dt = 400 physics steps — enough for a box to fall ~2m and come to rest.
+    print("[INFO] Settling rigid boxes under gravity (400 physics steps)...")
+    for _ in range(400):
+        scene.write_data_to_sim()
+        sim.step()
+        scene.update(dt=sim_cfg.dt)
+    print("[INFO] Boxes settled. Loading stage for inspection...")
 
     import omni.usd
 
