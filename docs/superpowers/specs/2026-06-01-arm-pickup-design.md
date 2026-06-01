@@ -147,18 +147,113 @@ as today — no new plumbing.
 - Delivering to a **wrong zone** while CARRYING (within R_zone of zone k≠target):
   per-step penalty; no success, no termination (robot may still reach correct zone).
 
-## 7. Scripted Arm Reach (inside REACHING)
+## 7. Scripted Arm Reach + Grasp (inside REACHING)
 
-- Use Isaac Lab `DifferentialIKController` to compute `panda_joint1..7` targets driving the
-  end-effector to the box grasp pose (top-down approach). Box poses are known from
-  `STATION_SPECS`, so a per-station precomputed joint trajectory is an acceptable fallback
-  if IK proves fiddly.
-- Gripper: command `panda_finger_joint.*` open→closed at the attach frame.
-- **Kinematic attach:** from attach frame onward, each physics step set the box root pose =
-  end-effector (gripper) world pose + grasp offset, and zero the box velocity. Same trick as
-  the box-follow mechanic; reliable, no contact instability.
-- During REACHING the **base is frozen**: zero base joint velocity targets, ignore policy
-  action for those frames. Robot does not translate while the arm works.
+The reach is a fixed-length scripted sequence of `K_reach ≈ 15` control steps (1.5 s @ 10 Hz),
+split into sub-phases by frame index. The arm is position-controlled the whole time; only the
+**targets** change per frame.
+
+```
+frame 0 .. a1   (descend) : ee interpolates from carry/tucked pose -> pre-grasp pose
+                            (10 cm above box), fingers OPEN (0.04)
+frame a1 .. a2  (settle)  : ee interpolates pre-grasp -> grasp pose (at box top)
+frame a2        (close)   : command fingers CLOSED (0.0); on next step -> kinematic attach
+frame a2 .. K   (lift)    : ee interpolates grasp -> carry pose (box held ~0.5 m above base)
+```
+
+**IK** — Isaac Lab `DifferentialIKController`, `command_type="pose"`, `ik_method="dls"`
+(damped least-squares; stable near singularities). Per frame: read the arm Jacobian +
+current ee pose from the articulation physx view, command the interpolated target ee pose,
+write resulting `panda_joint1..7` position targets. Targets are **interpolated** (not
+step-jumps) so joint velocity stays bounded — no snap, no solver explosion.
+
+- **Grasp pose:** position from `STATION_SPECS[target].box_pick_pose`; orientation = fixed
+  top-down quaternion (gripper z-axis pointing down). Reach stays inside the Panda workspace
+  by the §5 placement constraint, so DLS always finds a solution.
+- **Fallback:** if live IK is fiddly, precompute the 7-DOF joint waypoints per station offline
+  (poses are static) and replay them — deterministic, zero runtime IK risk.
+- **Gripper:** `panda_finger_joint.*` position target 0.04 (open) → 0.0 (closed) at the close
+  frame.
+- **Base frozen during REACHING:** command base joint **velocity targets = 0** every frame and
+  ignore the policy action. Do NOT disable the actuators — zero-velocity + the cfg's high base
+  damping (1e5) holds the base still. The arm keeps its own position control independently.
+
+## 7b. Physics & Kinematics (detailed — stability is a hard requirement)
+
+### 7b.1 Simulation / solver settings
+- Physics `dt = 0.005` (200 Hz), `decimation = 20` → 10 Hz control (unchanged).
+- PhysX TGS solver. Raise iteration counts for the arm + contacts on the robot's
+  `ArticulationRootPropertiesCfg`:
+  `solver_position_iteration_count = 12`, `solver_velocity_iteration_count = 1`.
+- Set `PhysxCfg.enable_external_forces_every_iteration = True` (the sim startup warning
+  explicitly recommends this with ≥1 velocity iteration to reduce noisy velocities).
+- `enabled_self_collisions = False` on the robot articulation (from the shipped cfg — Franka
+  self-collisions are a common instability source; keep off).
+
+### 7b.2 Robot control model (from shipped `RIDGEBACK_FRANKA_PANDA_CFG`)
+- **Base** (`dummy_base_prismatic_x/y_joint`, `dummy_base_revolute_z_joint`): velocity
+  control, stiffness 0, damping 1e5, effort 1000. Action → `prismatic_x` vel = linear,
+  `revolute_z` vel = angular. **`prismatic_y` velocity target hard-set to 0 every step**
+  (prevents holonomic strafe drift).
+- **Arm** (`panda_joint1..7`): position control, stiffness 800, damping 40. PD holds targets
+  against gravity; we only feed position targets from IK.
+- **Gripper** (`panda_finger_joint1/2`): position control, stiffness 1e5, damping 1e3.
+- **`activate_contact_sensors`:** shipped cfg has this **False**. The collision-penalty
+  contact sensor requires it **True** → override to `True` in our robot cfg. (Without this the
+  contact sensor reads zero forces silently.)
+
+### 7b.3 Kinematic attach — exact mechanism (the key anti-jitter design)
+The pickable box is a `RigidObjectCfg` (dynamic: gravity, visible, collidable while free).
+Carrying is implemented by **post-physics pose overwrite**, evaluated AFTER `sim.step()` each
+control step so it always wins over contact forces:
+
+1. On the close frame, attach: record `grasp_offset` = inverse(ee_pose) * box_pose at that
+   instant (captures the exact relative transform — no snap).
+2. Every subsequent control step while CARRYING:
+   `box_pose = ee_pose * grasp_offset`; then
+   `box.write_root_pose_to_sim(box_pose)` and
+   `box.write_root_velocity_to_sim(0)` (or = ee linear velocity to avoid a jerk at release).
+3. Because this runs post-step, any gripper-vs-box contact penetration from the physics
+   substep is corrected the same frame → no buildup, no jitter, no explosion.
+- **Collision filtering:** additionally filter box↔robot collisions during CARRYING (PhysX
+  collision group) so the held box never pushes the arm. Belt-and-suspenders with (3).
+- **Mass irrelevance:** kinematic pose-write ignores box mass, so the heavy (12 kg) box does
+  not slip or drag the arm. `BOX_MASSES` still matters only for the free/resting + release
+  dynamics.
+
+### 7b.4 Release at the zone (DONE)
+- Stop pose-overwrite; re-enable box↔robot collision; open gripper.
+- Set box velocity to 0 and place it at `zone_center_xy, z = box_size/2 + ε` so it settles
+  cleanly on the floor (no fling, no interpenetration with the zone slab).
+- Box then rests under normal dynamics inside the zone.
+
+### 7b.5 Pickable box at rest (pre-grasp)
+- Box rests on a low static shelf/pedestal (`AssetBaseCfg` with collision) at `pick_z`.
+- To stop the box being knocked off before grasp, it is held **kinematic-by-pose-write at its
+  station pose while phase == SEEKING** (same overwrite trick), released to the grasp logic on
+  attach. This guarantees the box is exactly where IK expects it.
+
+### 7b.6 Reset / settle
+- On episode reset: robot joints → cfg init (arm tucked), base → spawn pose at receiving;
+  each box → its station pick pose; pickup state → SEEKING.
+- Let the sim run a few settle steps post-reset before counting reward (arm holds tucked pose
+  via position control; base rests on floor at its natural height).
+
+### 7b.7 Ordering of the per-control-step callback (authoritative)
+```
+1. policy action in  ->  (if REACHING/CARRYING: override per state machine)
+2. write base joint vel targets (or 0 if frozen)
+3. write arm joint pos targets (IK result, or hold)
+4. write gripper target
+5. sim.step()  x decimation
+6. POST-STEP: pickup_manager.update():
+      - advance phase / timers
+      - if CARRYING: overwrite box pose = ee * grasp_offset, zero vel
+      - if SEEKING:  overwrite resting box poses
+      - write env.goal_pos for current phase
+7. compute obs + reward + termination
+```
+This ordering (overwrite in step 6, after physics) is what guarantees stability.
 
 ## 8. Observations / Reward / Termination
 
@@ -166,16 +261,33 @@ as today — no new plumbing.
 - Add `carrying = ObsTerm(func=carrying_flag)` returning `env.pickup.carrying` as `(B,1)`.
 - `goal` term unchanged in code (reads `env.goal_pos`, now phase-dependent).
 
-**Rewards** (`warehouse_reward.py`, weights tunable in Pass)
-| Term | Trigger | Sign/scale (initial) |
-|---|---|---|
-| `shaping` | dist(base, active goal) | −0.01 × dist |
-| `pickup_success` | SEEKING→REACHING (correct grasp), once | +5 (one-shot) |
-| `wrong_marker_pen` | near wrong marker, per step | −0.5 |
-| `delivery_success` | DONE (correct box at correct zone) | +10 |
-| `wrong_zone_pen` | near wrong zone while carrying, per step | −0.5 |
-| `time_pen` | per step | −0.005 |
-| `collision` | base contact > 5 N (existing sensor) | −5 |
+**Rewards** (`warehouse_reward.py`, weights tunable in a Pass). The arm is scripted, so its
+*motion* is deterministic — but the reward still **scores the full pick-and-place outcome**,
+and several terms are gradient-bearing because they depend on the policy-controlled base
+position (where the base stops sets the grasp geometry and the placement accuracy).
+
+| Term | Trigger / metric | Sign·scale (initial) | Gradient source |
+|---|---|---|---|
+| `approach_shaping` | −dist(base, active goal) per step | −0.01 × dist | base nav (policy) |
+| `align_bonus` | at correct marker, + for base well-centered & box inside arm workspace: `+exp(−d_marker)` | +0.5 max | base placement (policy) |
+| `grasp_success` | one-shot when attach verified (box within tol of ee after close) | +5 | validates physics; gates progress |
+| `carry_stability` | per step while CARRYING, penalty if `‖box−ee‖ > tol` (attach slipped) | −1.0 | physics health check |
+| `place_accuracy` | at release, `+exp(−‖box_xy − zone_center‖)` — precise placement | +3 max | base stop position (policy) |
+| `delivery_success` | DONE: correct box released, resting inside correct zone bounds | +10 (one-shot) | task success |
+| `arm_smoothness` | per REACHING step, −Σ‖arm_joint_vel‖ (flags violent/unstable IK) | −0.002 | physics health check |
+| `wrong_marker_pen` | near wrong-category marker, per step | −0.5 | base nav (policy) |
+| `wrong_zone_pen` | near wrong zone while CARRYING, per step | −0.5 | base nav (policy) |
+| `time_pen` | per step | −0.005 | efficiency |
+| `collision` | base contact > 5 N (existing sensor, needs `activate_contact_sensors=True`) | −5 | safety |
+
+Notes:
+- **"Gerakan tangan diperhatikan":** `grasp_success`, `carry_stability`, `arm_smoothness`, and
+  `place_accuracy` together reward a clean, complete arm pick→hold→place — not just "base in
+  zone." If the scripted grasp ever fails or the box slips, reward drops, surfacing the problem.
+- **Policy still learns** via `approach_shaping`, `align_bonus`, `place_accuracy`,
+  `wrong_*_pen` — all driven by where the base goes/stops. `place_accuracy` in particular makes
+  the agent stop at a base pose that lets the (scripted) arm place the box dead-center.
+- All thresholds/weights live in `configs/env_config.yaml` for tuning.
 
 **Terminations** (`warehouse_env.py` TerminationsCfg)
 - `success`: `phase == DONE`.
@@ -187,11 +299,11 @@ as today — no new plumbing.
 
 | File | Change |
 |---|---|
-| `env/warehouse_scene.py` | robot → RidgebackFranka; add `STATION_SPECS`, markers, pickable boxes |
-| `env/pickup_manager.py` | **new** — state machine, scripted arm/grasp, goal writing |
-| `env/warehouse_env.py` | base `(2,)`→base-joint mapping; `carrying` obs; wire pickup manager into step/reset; reward/termination cfg |
-| `env/warehouse_reward.py` | new reward funcs (pickup, wrong-marker, delivery gated on carrying, wrong-zone) |
-| `configs/env_config.yaml` | new params (station coords, radii, K_reach, weights) |
+| `env/warehouse_scene.py` | robot → RidgebackFranka (`activate_contact_sensors=True`, solver iters 12/1); add `STATION_SPECS`, markers, pickable boxes; set `PhysxCfg.enable_external_forces_every_iteration=True` |
+| `env/pickup_manager.py` | **new** — state machine, scripted arm IK/grasp, post-step box pose-overwrite, goal writing |
+| `env/warehouse_env.py` | base `(2,)`→base-joint vel mapping (zero `prismatic_y`); `carrying` obs; wire pickup manager into post-step/reset; reward/termination cfg |
+| `env/warehouse_reward.py` | new reward funcs (align, grasp_success, carry_stability, place_accuracy, delivery, wrong-marker, wrong-zone, arm_smoothness) |
+| `configs/env_config.yaml` | new params: station coords, radii, `K_reach`, attach tol, IK (method/damping), solver iters, all reward weights |
 | `tests/test_pickup_manager.py` | **new** — pure-python state-machine transition tests (no Isaac Sim) |
 | `tests/test_env.py` | update obs contract assertions (+`carrying`) |
 | `docs/environment.md` | document pickup task + new obs key |
@@ -214,8 +326,14 @@ as today — no new plumbing.
 | Blackwell SDP camera crash (open bug) | high | unchanged risk; camera on base. Pickup manager works headless w/o sensor cam for unit tests. Real fix tracked in `bugs_errors/2026-05-22_sdp-camera-crash-blackwell.md` |
 | Arm IK fiddly / unreachable box pose | med | box at reachable `pick_z` (≤0.9 m); per-station precomputed joint trajectory fallback |
 | Base frozen during REACHING feels abrupt | low | tune `K_reach`; acceptable for v1 |
-| Sparse pickup reward → slow convergence | med | dense `shaping` to active goal + one-shot `pickup_success`; tune weights in a Pass |
-| Holonomic base leaks strafe | low | hard-zero `prismatic_y` target every step |
+| Sparse pickup reward → slow convergence | med | dense `approach_shaping` + `align_bonus` + `place_accuracy`; one-shot `grasp_success`; tune in a Pass |
+| Holonomic base leaks strafe | low | hard-zero `prismatic_y` velocity target every step |
+| Carried box jitters / explodes (contact fight) | med | **post-step** pose-overwrite (§7b.3) wins over physics; + box↔robot collision filter during CARRYING; zero box velocity each step |
+| Box knocked off shelf before grasp | med | hold box kinematic-by-overwrite while SEEKING (§7b.5) so it stays exactly at the IK target |
+| Arm solver instability / joint snap | med | interpolated ee targets (bounded joint vel), DLS IK, raised `position_iteration_count=12`, self-collisions off |
+| Release fling / box bounces out of zone | low | zero box velocity at release, place at `z=box_size/2+ε` (§7b.4) |
+| Contact sensor reads zero (shipped cfg) | high-if-missed | override `activate_contact_sensors=True` on robot cfg (§7b.2) |
+| Base settles/penetrates floor at spawn | low | spawn at natural base height; few settle steps post-reset before reward counts |
 
 ## 12. Escalation Seam (future, NOT this spec)
 
