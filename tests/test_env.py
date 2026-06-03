@@ -94,8 +94,19 @@ def run_tests(num_envs: int) -> list[Result]:
             action = np.random.uniform(-1.0, 1.0, size=(num_envs, 2)).astype(np.float32)
             obs, reward, term, trunc, _ = env.step(action)
         _record(results, "env.step() runs 10 steps", True)
+        
+        # Verify box physics (boxes shouldn't fall through shelves)
+        from env.warehouse_scene import ITEM_SPECS
+        fallen = 0
+        for name, _, _, _ in ITEM_SPECS:
+            box = env._env.scene[name]
+            z = box.data.root_pos_w[0, 2].item()
+            if z < 0.5:
+                fallen += 1
+        _record(results, "Physics: Boxes remain on shelves (z > 0.5)", fallen == 0, f"Fallen: {fallen}")
+            
     except Exception as e:
-        _record(results, "env.step() runs 10 steps", False, repr(e))
+        _record(results, "env.step() / physics check", False, repr(e))
         env.close()
         return results
 

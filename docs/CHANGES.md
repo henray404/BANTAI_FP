@@ -70,10 +70,10 @@ shaping = RewTerm(func=distance_to_goal, weight=-0.01)  # sign explicit in weigh
 
 ---
 
-### P0.3 — Replace Jetbot → NVIDIA Carter v2.4
+### P0.3 — Mobile Base (Diff-Drive) & Assets (2026-05-15)
 
-> **⚠️ SUPERSEDED** — Carter v2.4 was subsequently replaced by **Ridgeback-Franka** (2026-06-01).
-> See §"2026-06-01 (Robot Switch)" below for current robot config. This section is kept for history only.
+> [!WARNING]
+> **SUPERSEDED** — The robot was switched from Carter v2.4 to Ridgeback-Franka. See §2026-06-01 Robot Switch below.
 
 **Files:** `env/warehouse_scene.py`, `env/warehouse_env.py`, `configs/env_config.yaml`
 
@@ -124,6 +124,13 @@ MAX_ANG_SPEED = 1.5     # rad/s (was 2.0)
 **Change:** `threshold=1.5m` in both `delivery_success()` and `reached_goal()`.
 - 1.5m = zone edge from center (3×3m zone → ±1.5m)
 - Robot succeeds when it enters the zone footprint
+
+### Pending Items
+*(Deferred to DreamerV3 Integration / Later Phases)*
+
+- **Verify `effort_limit_sim`**: For Ridgeback-Franka dummy joints (currently INCONCLUSIVE physics frame testing due to base locking from friction vs effort limits).
+- **Wiring goal_emb**: Connect to CLIP pipeline in Phase 4.
+- **Tuning Rewards**: Validate collision penalty tuning in DreamerV3.
 
 ---
 

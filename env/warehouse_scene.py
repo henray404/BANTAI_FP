@@ -33,7 +33,7 @@ Category encoding:
     regular = CubeBox 32 cm   zone_B (cyan)
     heavy   = CubeBox 52 cm   zone_C (purple)
 USD scale: scale=(0.01,0.01,0.01) on all NVIDIA DT assets (cm-authored, no auto-convert).
-Robot: Ridgeback-Franka mobile manipulator (Nucleus USD). Spawns receiving-north.
+Robot: Ridgeback-Franka (Nucleus USD). Spawns receiving-north.
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ RIDGEBACK_FRANKA_CFG = ArticulationCfg(
     actuators={
         "base": ImplicitActuatorCfg(
             joint_names_expr=["dummy_base_.*"],
-            effort_limit_sim=1000.0,
+            effort_limit_sim=100000.0,
             stiffness=0.0,
             damping=1e5,
         ),

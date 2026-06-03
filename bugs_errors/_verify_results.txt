@@ -1,0 +1,12 @@
+
+--- BOX VERIFICATION ---
+Total boxes checked: 54
+Boxes on floor (z < 0.3): 0
+Boxes on shelf (z > 0.3): 54
+PASSED: All boxes are on shelves.
+
+--- PRISMATIC FRAME VERIFICATION ---
+Phase 1 disp: 0.000
+Phase 3 disp: 0.000
+INCONCLUSIVE
+------------------------
