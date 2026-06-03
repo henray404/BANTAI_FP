@@ -79,7 +79,10 @@ def collision_penalty(
     Requires ContactSensorCfg on Robot chassis (see warehouse_scene.py).
     """
     sensor: ContactSensor = env.scene[sensor_cfg.name]
-    net_force = sensor.data.net_forces_w_history[:, 0, :].norm(dim=-1)
+    # net_forces_w_history is (N, T, B, 3): envs, history, bodies, xyz. Take latest frame (T=0),
+    # force magnitude per body, then MAX over bodies → (N,). Without amax the body dim leaks as
+    # (N, B)=[1,1] and reward_manager's `reward_buf += value` raises a [1] vs [1,1] broadcast error.
+    net_force = sensor.data.net_forces_w_history[:, 0, :, :].norm(dim=-1).amax(dim=-1)
     return -(net_force > threshold_n).float()
 
 

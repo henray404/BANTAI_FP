@@ -33,7 +33,7 @@ Category encoding:
     regular = CubeBox 32 cm   zone_B (cyan)
     heavy   = CubeBox 52 cm   zone_C (purple)
 USD scale: scale=(0.01,0.01,0.01) on all NVIDIA DT assets (cm-authored, no auto-convert).
-Robot: Jetbot (Nucleus USD). Spawns receiving-north.
+Robot: Ridgeback-Franka mobile manipulator (Nucleus USD). Spawns receiving-north.
 """
 
 from __future__ import annotations
@@ -82,11 +82,6 @@ ZONE_ITEM_MAP: dict[str, str] = {
 }
 
 # Prop USD paths (all cm-authored, scale 0.01 applied in _prop_cfg)
-FORKLIFT_USD   = _usd("Equipment/Forklifts/Forklift_A/Forklift_A01_PR_V_NVD_01.usd")
-PALLET_ASM_USD = [
-    _usd("Shipping/Cardboard_Boxes_on_Pallet/Pallet_Asm_A/Pallet_Asm_A01_66x66x46cm_PR_V_NVD_01.usd"),
-    _usd("Shipping/Cardboard_Boxes_on_Pallet/Pallet_Asm_A/Pallet_Asm_A04_120x122x75cm_PR_V_NVD_01.usd"),
-]
 PALLET_USD = _usd("Shipping/Pallets/Plastic/Economy_A/EconomyPlasticPallet_A01_PR_NVD_01.usd")
 CONE_USD   = _usd("Safety/Cones/Heavy-Duty_Traffic/HeavyDutyTrafficCone_A02_71cm_PR_V_NVD_01.usd")
 SIGN_USD   = _usd("Safety/Floor_Signs/Warning_A/WarningSign_A01_PR_NVD_01.usd")
@@ -223,10 +218,8 @@ ZONE_SPECS = [
 ]
 
 # Static props: (name, usd_path, (x, y, z))
+# forklift + palletasm removed — unnecessary USD load, SDP pressure on Blackwell.
 PROP_SPECS = [
-    ("forklift_0",  FORKLIFT_USD,      (-5.0,  12.0, 0.0)),
-    ("palletasm_0", PALLET_ASM_USD[0], ( 3.0,  12.0, 0.0)),
-    ("palletasm_1", PALLET_ASM_USD[1], ( 5.0,  12.0, 0.0)),
     ("pallet_0",    PALLET_USD,        (-3.0,  -7.0, 0.0)),
     ("pallet_1",    PALLET_USD,        ( 4.0,  -7.0, 0.0)),
     ("cone_0",      CONE_USD,          (-3.0,   4.0, 0.0)),
@@ -295,9 +288,15 @@ def _item_cfg(name: str, size: float, mass: float, pos: tuple) -> RigidObjectCfg
     Size (0.21/0.32/0.52m) encodes category for CLIP/YOLO.
     Color differentiates category visually at 64x64 resolution.
     BOX_USD paths are kept as constants for future use if assets gain RigidBodyAPI.
+
+    Per-box visual_material (54 PreviewSurfaceCfg nodes): verified safe on driver 580.88
+    — test_env.py ALL PASS 2026-06-03 with camera ON. Was previously suspected as SDP crash
+    trigger on 591.x/595.x; keep driver pinned at 580.88 (see bugs_errors/sdp-camera-crash).
     """
+    # Brown shades per category — light=fragile, medium=regular, dark=heavy.
+    _COLORS = {0.21: (0.85, 0.70, 0.45), 0.32: (0.70, 0.52, 0.28), 0.52: (0.50, 0.37, 0.18)}
+    color = _COLORS.get(size, (0.75, 0.60, 0.35))
     # Spawn 5cm above target shelf surface — falls onto shelf deck.
-    # pos[2] = shelf_z + size/2 (box center at rest); +0.05 gives clearance above deck.
     raised_pos = (pos[0], pos[1], pos[2] + 0.05)
     return RigidObjectCfg(
         prim_path=f"{{ENV_REGEX_NS}}/{name}",
@@ -312,9 +311,7 @@ def _item_cfg(name: str, size: float, mass: float, pos: tuple) -> RigidObjectCfg
                 contact_offset=0.005,
                 rest_offset=0.0,
             ),
-            # No visual_material: 54 individual PreviewSurfaceCfg nodes trigger SDP crash on
-            # Blackwell RTX 5050 (omni.syntheticdata BindMaterialCommand overflow).
-            # Category differentiation via size (0.21/0.32/0.52m) — sufficient for YOLO/CLIP.
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=raised_pos),
     )
@@ -403,14 +400,15 @@ class WarehouseSceneCfg(InteractiveSceneCfg):
     zone_C = _zone_cfg(*ZONE_SPECS[2])
 
     # Contact sensor on the Ridgeback base — required for collision penalty (Phase 3).
-    # VERIFY the base BODY name from the articulation-init log (explore_scene strips this
-    # sensor, so spawn the robot once and read "Body names: [...]"). "base_link" is the
-    # best guess for the Ridgeback chassis; fix here if the path fails to resolve.
+    # base_link VERIFIED via smoke_test.py 2026-06-03 (robot.body_names includes "base_link").
+    # NO filter_prim_paths_expr: collision_penalty reads net_forces_w_history (net force on the
+    # chassis), not the per-object force_matrix. A filter expr must resolve to exactly 1 prim per
+    # env; "Rack_.*"/"wall_.*" matched 18/4 → PhysX "expected 1, found 18" → corrupt GPU contact
+    # view → CUDA illegal memory access on reset(). Net-force sensor needs no filter.
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base_link",
         update_period=0.0,
         history_length=3,
-        filter_prim_paths_expr=["{ENV_REGEX_NS}/Rack_.*", "{ENV_REGEX_NS}/wall_.*"],
     )
 
     def __post_init__(self) -> None:

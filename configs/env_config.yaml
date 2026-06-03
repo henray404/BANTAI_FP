@@ -2,13 +2,13 @@
 # Python defaults in env/warehouse_scene.py and env/warehouse_env.py mirror these.
 # Update BOTH when values change.
 #
-# Layout v2 (2026-05-30):
+# Layout v2 (2026-05-30; robot+box update 2026-06-01):
 #   - Room: 20x30m (rectangular, x+-10, y+-15)
 #   - 9 island blocks (3x3), 2 racks each = 18 racks
-#   - 18 size-coded boxes (fragile/regular/heavy cycling per rack)
-#   - Props: forklift + 2 pallet-asm (receiving) + 2 pallets + 4 cones + 2 signs
+#   - 54 RIGID size-coded boxes (18 racks x 3 shelf levels; fragile/regular/heavy cycling)
+#   - Props: 2 pallets + 4 cones + 2 signs (forklift + pallet-asm REMOVED: SDP pressure on Blackwell)
 #   - Zones moved south: y=-12 (was -7)
-#   - num_envs: 2 (VRAM safe for 30m room + props; try 4 after OOM test)
+#   - num_envs: 1 (Ridgeback-Franka + 54 rigid boxes saturate 8GB RTX 5050)
 #   - episode_length_s: 60 (north->south ~25m @1m/s + island nav)
 #   - env_spacing: 32 (>30m largest dim + buffer)
 #   - spawn: receiving-north (x[-8,8], y[11,14])
@@ -27,24 +27,29 @@ simulation:
   render_interval: 20
 
 robot:
-  type: "carter_v1"
-  source: "ISAAC_NUCLEUS_DIR/Robots/NVIDIA/Carter/carter_v1.usd"
-  wheel_base: 0.413         # Carter v1 APPROXIMATE — verify on first run (carter_v2.4 not on Isaac 5.1 server)
-  wheel_radius: 0.100       # Carter v1 APPROXIMATE — verify on first run
-  max_lin_speed: 1.5        # m/s — Carter capable 2.0; 1.5 safe for training
-  max_ang_speed: 1.5        # rad/s
-  action_scale: 1.0
-  init_pos: [0.0, 0.0, 0.15]  # Carter sits 15cm off ground (was 5cm Jetbot)
-  spawn_x: [-8.0, 8.0]     # receiving-north x range
-  spawn_y: [11.0, 14.0]    # receiving-north y range
-  physics:
-    static_friction: 0.9
-    dynamic_friction: 0.7
-    restitution: 0.0
-    friction_combine_mode: "multiply"
-    max_depenetration_velocity: 1.0   # was 5.0 — lower prevents ghost-through
-    effort_limit: 20.0                # N·m (was 100.0 — nonsensical for any robot)
-    velocity_limit: 25.0              # rad/s
+  type: "ridgeback_franka"   # mobile manipulator (replaced Carter/Jetbot 2026-06-01)
+  source: "ISAAC_NUCLEUS_DIR/Robots/Clearpath/RidgebackFranka/ridgeback_franka.usd"
+  # Holonomic base forced to diff-drive via 3 dummy base joints (no wheel kinematics):
+  base_joints: ["dummy_base_prismatic_x_joint", "dummy_base_prismatic_y_joint", "dummy_base_revolute_z_joint"]
+  arm_joints: "panda_joint1..7"        # position ctrl, tucked pose
+  gripper_joints: "panda_finger_joint1/2"
+  max_lin_speed: 1.5        # m/s — base prismatic_x velocity target
+  max_ang_speed: 1.5        # rad/s — base revolute_z velocity target
+  action_scale: 1.0         # _base_cmd emits joint velocity targets directly
+  spawn_x: [-8.0, 8.0]      # receiving-north x range
+  spawn_y: [11.0, 14.0]     # receiving-north y range
+  # VERIFY on first run: base prismatic frame (world vs body — run smoke_test.py);
+  #   chassis BODY name for contact sensor (currently guessed "base_link"); VRAM on 8GB.
+  articulation:
+    enabled_self_collisions: false          # Franka self-collisions = instability source
+    solver_position_iteration_count: 12     # raised for arm/contact stability
+    solver_velocity_iteration_count: 1
+    activate_contact_sensors: true          # shipped cfg is False — collision sensor needs True
+  actuators:
+    base:           { stiffness: 0.0,   damping: 1.0e5, effort_limit: 1000.0 }
+    panda_shoulder: { stiffness: 800.0, damping: 40.0,  effort_limit: 87.0 }   # panda_joint1-4
+    panda_forearm:  { stiffness: 800.0, damping: 40.0,  effort_limit: 12.0 }   # panda_joint5-7
+    panda_hand:     { stiffness: 1.0e5, damping: 1.0e3, effort_limit: 200.0 }  # fingers
 
 observation:
   image_size: [64, 64]
@@ -58,7 +63,7 @@ camera:
   update_period: 0.1
   focal_length: 18.0          # was 24.0; 18mm → HFOV ~60° (was 47°); matches RealSense D435
   horizontal_aperture: 20.955
-  offset_pos: [0.15, 0.0, 0.50]   # was [0.05, 0.0, 0.10]; 50cm height on Carter
+  offset_pos: [0.35, 0.0, 0.55]   # front-top of Ridgeback base, forward-facing
   offset_rot: [0.5, -0.5, 0.5, -0.5]
   data_types: ["rgb"]
   note: "TiledCameraCfg only - CameraCfg crashes on RTX 5050 Blackwell"
@@ -102,15 +107,20 @@ scene:
   racks:
     usd: "assets/Shelving/Racks/Rack_L/Rack_L01_PR_NVD_01.usd"
     scale: 0.01             # cm->m unit fix; no auto-convert in Isaac Lab UsdFileCfg
-    shelf_z: 1.5            # RETUNE: was Rack_A (2.0m). Rack_L height unknown -> run explore_rack.py
+    shelf_levels_z: [0.72351, 1.32528, 1.92566]  # measured 2026-05-30 (bottom/mid/top surface z)
+    shelf_deck_size: [0.70, 0.70, 0.02]          # solid CuboidCfg deck per level (54 total)
+    # VERIFY first run: if boxes fall to floor not shelf, recalibrate via explore_rack.py
 
   items:
-    count: 18
-    type: "static_usd"      # AssetBaseCfg, stays on shelves across resets
+    count: 54               # 18 racks x 3 shelf levels
+    type: "rigid_cuboid"    # RigidObjectCfg + CuboidCfg (gravity + mass); NOT USD (DT box USDs lack RigidBodyAPI)
+    randomize_on_reset: true  # x,y jitter within shelf deck each episode (_randomize_box_poses)
+    masses_kg: { fragile: 2.0, regular: 6.0, heavy: 12.0 }
+    colors: "brown shades (light=fragile, medium=regular, dark=heavy)"
     categories:
-      fragile: { usd: "CubeBox_A03_21cm_PR_NVD_01.usd", size_m: 0.21 }
-      regular: { usd: "CubeBox_A05_32cm_PR_NVD_01.usd", size_m: 0.32 }
-      heavy:   { usd: "CubeBox_A07_52cm_PR_NVD_01.usd", size_m: 0.52 }
+      fragile: { size_m: 0.21 }   # usd ref kept in BOX_USD for future RigidBodyAPI assets
+      regular: { size_m: 0.32 }
+      heavy:   { size_m: 0.52 }
 
   zones:
     count: 3
@@ -120,9 +130,8 @@ scene:
       - { name: "zone_B", color: [0.0, 0.9, 0.9], pos: [ 0.0, -12.0, 0.01], category: "regular" }
       - { name: "zone_C", color: [0.7, 0.0, 0.9], pos: [ 6.0, -12.0, 0.01], category: "heavy"   }
 
+  # forklift + boxes_on_pallet (pallet-asm) REMOVED 2026-06-01 — unnecessary USD load + SDP pressure on Blackwell.
   props:
-    forklift:       { count: 1, usd: "Equipment/Forklifts/Forklift_A/Forklift_A01_PR_V_NVD_01.usd", pos: [-5, 12, 0] }
-    boxes_on_pallet:{ count: 2, usd: "Shipping/Cardboard_Boxes_on_Pallet/Pallet_Asm_A/", pos: [[3,12,0],[5,12,0]] }
-    empty_pallet:   { count: 2, usd: "Shipping/Pallets/Plastic/Economy_A/EconomyPlasticPallet_A01_PR_NVD_01.usd" }
+    pallet:         { count: 2, usd: "Shipping/Pallets/Plastic/Economy_A/EconomyPlasticPallet_A01_PR_NVD_01.usd", pos: [[-3,-7,0],[4,-7,0]] }
     cone:           { count: 4, usd: "Safety/Cones/Heavy-Duty_Traffic/HeavyDutyTrafficCone_A02_71cm_PR_V_NVD_01.usd" }
     warning_sign:   { count: 2, usd: "Safety/Floor_Signs/Warning_A/WarningSign_A01_PR_NVD_01.usd" }

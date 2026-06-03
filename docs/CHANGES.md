@@ -72,6 +72,9 @@ shaping = RewTerm(func=distance_to_goal, weight=-0.01)  # sign explicit in weigh
 
 ### P0.3 — Replace Jetbot → NVIDIA Carter v2.4
 
+> **⚠️ SUPERSEDED** — Carter v2.4 was subsequently replaced by **Ridgeback-Franka** (2026-06-01).
+> See §"2026-06-01 (Robot Switch)" below for current robot config. This section is kept for history only.
+
 **Files:** `env/warehouse_scene.py`, `env/warehouse_env.py`, `configs/env_config.yaml`
 
 **Problem:** Jetbot is an 11.3cm × 11.3cm toy robot (~500g).
@@ -214,14 +217,14 @@ No change. `goal_emb` interface unchanged.
 
 ## Pending (Phase 2+)
 
-| ID | Change | Trigger |
+| ID | Change | Status |
 |---|---|---|
-| P2.1 | Add velocity obs `[lin_vel, ang_vel]` | P2 sign-off |
-| P2.2 | Add depth channel (3→4 channels) | P2 sign-off |
-| P2.4 | Randomize box positions ±0.1m per reset | Phase 2 start |
-| Verify | Confirm `chassis_link` prim name in Carter USD at first run | First run |
-| Verify | Confirm `.*wheel.*` regex matches Carter joints at first run | First run |
-| Verify | If boxes fall to floor (not shelf): recalibrate `RACK_SHELF_Z` via `explore_rack.py` | First run |
+| P2.1 | Add velocity obs `[lin_vel, ang_vel]` | **REJECTED** — council consensus: DreamerV3 RSSM reconstructs motion from pixel sequences (see `warehouse_env.py` header) |
+| P2.2 | Add depth channel (3→4 channels) | Open — awaiting P2 sign-off |
+| ~~P2.4~~ | ~~Randomize box positions ±0.1m per reset~~ | **DONE** — `_randomize_box_poses()` in `WarehouseRLEnv` |
+| ~~Verify~~ | ~~Confirm `chassis_link` prim name~~ | **DONE** — body is `base_link` on Ridgeback-Franka (verified smoke_test 2026-06-03) |
+| ~~Verify~~ | ~~Confirm `.*wheel.*` regex~~ | **N/A** — Ridgeback has dummy base joints, no wheels |
+| Verify | If boxes fall to floor (not shelf): recalibrate `RACK_SHELF_Z` via `explore_rack.py` | Open — verify box z-positions |
 
 ---
 
@@ -241,3 +244,93 @@ No change. `goal_emb` interface unchanged.
 | episode reset | automatic via `scene.reset()` — boxes return to init_state each episode |
 
 If boxes still fall to floor instead of settling on shelf: shelf collision geometry missing or `RACK_SHELF_Z` wrong — recalibrate via `explore_rack.py`.
+
+---
+
+## 2026-06-01 (Robot Switch) — Carter v2.4 → Ridgeback-Franka Mobile Manipulator
+
+**Supersedes P0.3** above (Carter v2.4). The robot is now a **mobile manipulator**, not a
+diff-drive base. Motivation: the project's "pick → carry → deliver" thesis needs a physical
+arm (user realism requirement). Design spec: `docs/superpowers/specs/2026-06-01-arm-pickup-design.md`.
+
+### What changed
+| Aspect | Carter v2.4 (was) | Ridgeback-Franka (now) |
+|---|---|---|
+| Type | diff-drive AMR | Clearpath Ridgeback holonomic base + Franka Panda 7-DOF arm + 2-finger gripper |
+| USD | `Robots/NVIDIA/Carter/carter_v2.4.usd` | `{ISAAC_NUCLEUS_DIR}/Robots/Clearpath/RidgebackFranka/ridgeback_franka.usd` |
+| Joints | 2 wheels (+casters) | 3 dummy base (prismatic_x/y + revolute_z) + 7 arm + 2 finger = 12 |
+| Drive | wheel kinematics (WHEEL_BASE/RADIUS) | **no wheel kinematics**; `_base_cmd` maps action (2,) → base joint velocities [vx, vy=0, wz] |
+| Action space | (2,) `[lin, ang]` | (2,) `[lin, ang]` — **unchanged** (holonomic base forced to diff-drive) |
+| Contact sensor body | `chassis_link` | `base_link` (**guessed** — verify first run) |
+
+### Robot cfg (`warehouse_scene.py` → `RIDGEBACK_FRANKA_CFG`)
+- Mirrors Isaac Lab `RIDGEBACK_FRANKA_PANDA_CFG` with 2 overrides:
+  - `activate_contact_sensors=True` (shipped False — collision sensor reads zero without it)
+  - `solver_position_iteration_count=12`, `velocity=1` (arm/contact stability)
+- Base actuator: stiffness 0, damping 1e5, effort 1000 (velocity ctrl).
+- Arm: panda_shoulder/forearm position ctrl (stiffness 800, damping 40). Gripper: stiffness 1e5.
+- Init pose: arm tucked, gripper open (0.035).
+- `enable_external_forces_every_iteration=True` set in `WarehouseEnvCfg.__post_init__`.
+
+### Box change (same window)
+- 18 static USD boxes → **54 RIGID CuboidCfg boxes** (18 racks × 3 shelf levels), gravity + mass
+  (fragile 2 / regular 6 / heavy 12 kg). 54 invisible CuboidCfg shelf decks added as collision
+  surfaces. `_randomize_box_poses()` jitters x,y within each deck on reset.
+- `num_envs` 2 → **1** (Ridgeback-Franka + 54 rigid boxes saturate 8GB).
+
+### Arm / pickup — NOT YET IMPLEMENTED
+The arm is present but only holds its tucked pose. No `pickup_manager.py`, no scripted IK, no
+`carrying` obs, no pickup rewards. Task is still **navigation single-goal**. Pickup is spec-only.
+
+### Verify on first run (carried over, robot-specific now)
+- Base prismatic frame: world vs body → run `smoke_test.py` (auto verdict). If world-frame,
+  `_base_cmd` must project by yaw.
+- Contact sensor body name (`base_link`) from articulation-init log.
+- VRAM fits on 8GB with 12-DOF articulation + 54 rigid boxes.
+
+---
+
+## 2026-06-03 (Status) — Open Blocker + Doc Sync
+
+- 🔴 **Camera SDP crash (RTX 5050 Blackwell) still OPEN.** RL env (`run_env.py`/`test_env.py`)
+  never passed end-to-end with camera on — TiledCamera does NOT bypass SDP on Isaac 5.1.
+  Only camera-strip scripts run. Tracked in `bugs_errors/2026-05-22_sdp-camera-crash-blackwell.md`.
+  This is the #1 critical-path item — see `docs/timeline_terbaru.md`.
+- Docs synced to code reality: `CLAUDE.md`, `configs/env_config.yaml`, `docs/project_overview.md`
+  updated (were describing Carter + 18 boxes + color-coded items + 3-stage curriculum that no
+  longer match the code).
+- ⚠️ Working-tree note: `warehouse_scene.py` re-adds per-box `visual_material` (54 PreviewSurfaceCfg).
+  May re-trigger the SDP crash (54 material nodes was a known trigger). Verify when camera is fixed.
+
+---
+
+## 2026-06-03 (RESOLVED) — Camera blocker cleared, env runs end-to-end with camera ON
+
+The 🔴 blocker above is **CLOSED**. Three fixes, in order:
+
+1. **NVIDIA driver 591.84 → 580.88** (Windows-validated for Isaac Sim 5.1, DDU clean install).
+   This alone killed the SDP camera crash (`state:_sdp_intergraph_downstream_node_handles_`).
+   The driver branch was the root cause all along — not the camera config. **Pin at 580.88; do not
+   auto-update to 591.x/595.x** (they reintroduce the Blackwell crash).
+
+2. **`warehouse_scene.py`: removed `ContactSensorCfg.filter_prim_paths_expr`.** With the SDP crash
+   gone, `env.reset()` hit `omni.physx.tensors: Filter pattern '…/Rack_*' expected 1, found 18`
+   → CUDA illegal memory access (corrupt GPU contact view). A filter expr must match exactly 1 prim
+   per env; `Rack_.*`/`wall_.*` matched 18/4. The filter was dead config — `collision_penalty` reads
+   net force, not the per-object matrix. Net-force sensor needs no filter.
+
+3. **`warehouse_reward.py`: `collision_penalty` shape fix.** `env.step()` hit
+   `reward_buf += value: output shape [1] doesn't match broadcast shape [1, 1]`. The body dim leaked:
+   `net_forces_w_history[:, 0, :].norm(dim=-1)` = `(N, B)` = `[1,1]`. Fixed with
+   `[:, 0, :, :].norm(dim=-1).amax(dim=-1)` → `(N,)`.
+
+**Verified:** `python tests/test_env.py --num_envs 1` (camera ON) → **ALL PASS (10/10)**.
+First end-to-end pass with the onboard camera in project history.
+
+**Also confirmed (smoke_test.py):** robot loads 12 joints / 19 bodies; `base_link` exists (contact
+prim_path verified); base joints `dummy_base_prismatic_x/y_joint` + `dummy_base_revolute_z_joint`
+verified. ⚠️ Smoke base-motion verdict still INCONCLUSIVE — measurement bug (`_base_xy` reads the
+fixed `world` root link, not `base_link`); fix smoke test before trusting world-vs-body frame.
+
+**Op note:** `simulation_app.close()` hangs on Blackwell after a clean run → leaves a zombie
+`python.exe` spinning a core + holding GPU mem. Kill stale processes between runs.

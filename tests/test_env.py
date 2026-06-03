@@ -68,6 +68,7 @@ def run_tests(num_envs: int) -> list[Result]:
         "position": (num_envs, 3),
         "goal":     (num_envs, 3),
         "goal_emb": (num_envs, GOAL_EMB_DIM),
+        "heading":  (num_envs, 2),
     }
     for key, want in expected_shapes.items():
         try:
@@ -97,6 +98,18 @@ def run_tests(num_envs: int) -> list[Result]:
         _record(results, "env.step() runs 10 steps", False, repr(e))
         env.close()
         return results
+
+    try:
+        frame = env.render()
+        ok = (
+            isinstance(frame, np.ndarray)
+            and frame.shape == (IMG_HW, IMG_HW, 3)
+            and frame.dtype == np.uint8
+        )
+        _record(results, f"env.render() -> uint8 ({IMG_HW},{IMG_HW},3)", ok,
+                f"shape={frame.shape} dtype={frame.dtype}")
+    except Exception as e:
+        _record(results, "env.render() returns frame", False, repr(e))
 
     try:
         ok = isinstance(reward, torch.Tensor) and reward.shape == (num_envs,)
