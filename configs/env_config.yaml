@@ -2,22 +2,24 @@
 # Python defaults in env/warehouse_scene.py and env/warehouse_env.py mirror these.
 # Update BOTH when values change.
 #
-# Layout v2 (2026-05-30; robot+box update 2026-06-01):
+# Layout v2 (2026-05-30; robot+box 2026-06-01; PICKUP redesign 2026-06-08):
 #   - Room: 20x30m (rectangular, x+-10, y+-15)
 #   - 9 island blocks (3x3), 2 racks each = 18 racks
-#   - 54 RIGID size-coded boxes (18 racks x 3 shelf levels; fragile/regular/heavy cycling)
+#   - 18 RIGID graspable boxes (one per rack, on FLOOR in front, within Franka reach; fragile/regular/heavy cycling)
 #   - Props: 2 pallets + 4 cones + 2 signs (forklift + pallet-asm REMOVED: SDP pressure on Blackwell)
 #   - Zones moved south: y=-12 (was -7)
-#   - num_envs: 1 (Ridgeback-Franka + 54 rigid boxes saturate 8GB RTX 5050)
-#   - episode_length_s: 60 (north->south ~25m @1m/s + island nav)
+#   - num_envs: 1 (Ridgeback-Franka + 18 rigid boxes + arm IK on 8GB RTX 5050)
+#   - episode_length_s: 100 (nav + grasp + carry + place; was 60)
 #   - env_spacing: 32 (>30m largest dim + buffer)
 #   - spawn: receiving-north (x[-8,8], y[11,14])
 #   - out_of_bounds: rectangular (x+-9.5, y+-14.5)
+#   - Task: pick->carry->place. CLIP/YOLO removed; category via goal_id one-hot.
+#     See docs/superpowers/specs/2026-06-08-pure-dl-pickup-redesign.md.
 
 env:
-  num_envs: 1   # 1 env: Ridgeback-Franka + 54 rigid boxes saturates 8GB RTX 5050
+  num_envs: 1   # 1 env: Ridgeback-Franka + 18 rigid boxes + arm IK on 8GB RTX 5050
   env_spacing: 32.0         # must exceed 30m room + buffer
-  episode_length_s: 60.0    # 60s x 10Hz = 600 steps
+  episode_length_s: 100.0   # 100s x 10Hz = 1000 steps (pick-place horizon)
   decimation: 20            # 200Hz physics / 20 = 10Hz policy (DreamerNav std)
   control_hz: 10
 
@@ -31,7 +33,7 @@ robot:
   source: "ISAAC_NUCLEUS_DIR/Robots/Clearpath/RidgebackFranka/ridgeback_franka.usd"
   # Holonomic base forced to diff-drive via 3 dummy base joints (no wheel kinematics):
   base_joints: ["dummy_base_prismatic_x_joint", "dummy_base_prismatic_y_joint", "dummy_base_revolute_z_joint"]
-  arm_joints: "panda_joint1..7"        # position ctrl, tucked pose
+  arm_joints: "panda_joint1..7"        # ACTIVE — DifferentialIK (relative EE pos, top-down)
   gripper_joints: "panda_finger_joint1/2"
   max_lin_speed: 1.5        # m/s — base prismatic_x velocity target
   max_ang_speed: 1.5        # rad/s — base revolute_z velocity target
@@ -54,9 +56,12 @@ robot:
 observation:
   image_size: [64, 64]
   channels: 3
-  goal_embedding_dim: 512
-  obs_keys: ["pixels", "position", "goal", "goal_emb", "heading"]
-  heading_dim: 2   # [cos(yaw), sin(yaw)] — added to fix random-spawn orientation blindness
+  # v2 (2026-06-08): goal_emb(512) replaced by goal_id(3) one-hot; manipulation keys added.
+  obs_keys: ["pixels", "position", "heading", "goal", "goal_id", "ee_pos", "gripper", "holding", "box_pos"]
+  heading_dim: 2     # [cos(yaw), sin(yaw)]
+  goal_id_dim: 3     # one-hot category [fragile, regular, heavy]
+  ee_pos_dim: 3      # end-effector xyz, base frame
+  box_pos_dim: 3     # target box xyz, env-local (UNANNEALED)
 
 camera:
   prim_path_suffix: "/Robot/onboard_cam"
@@ -69,15 +74,20 @@ camera:
   note: "TiledCameraCfg only - CameraCfg crashes on RTX 5050 Blackwell"
 
 action:
-  space: "Box(-1, 1, shape=(2,))"
-  axes: ["linear_vel", "angular_vel"]
+  space: "Box(-1, 1, shape=(6,))"
+  axes: ["base_lin", "base_ang", "ee_dx", "ee_dy", "ee_dz", "gripper"]
+  # External (6,) -> internal (7,) joint action: base_vel(3) + arm_ik(3) + gripper(1).
+  ee_step_m: 0.05   # EE Cartesian travel per control step at action==1.0
 
-reward:
-  delivery_success: 10.0      # was 1.0 — raised to balance against shaping scale
-  shaping_weight: -0.01       # was +0.05 (with negative func); now sign in weight, func returns +dist
-  time_penalty: -0.005        # was -0.001
-  collision_penalty: 5.0      # new — func returns 0/-1; effective=-5 per collision step
-  goal_threshold: 1.5         # was 0.5m — now matches zone edge (3x3m zone → ±1.5m)
+reward:   # staged pick-place (switches on holding); see spec §4
+  approach_weight: -0.01      # Phase A dense: -dist(ee, box), gated off while holding
+  grasp_success: 5.0          # +5 one-shot when box gripped + lifted
+  carry_weight: -0.01         # Phase B dense: -dist(box, zone), active while holding
+  delivery_success: 10.0      # +10 while held box inside its commanded color zone
+  time_penalty: -0.005        # efficiency
+  collision_penalty: 5.0      # func returns 0/-1; effective=-5 per collision step
+  drop_penalty: -2.0          # one-shot when box dropped mid-carry outside any zone
+  deliver_radius_m: 1.5       # box within this of zone center = delivered (zone edge)
 
 termination:
   goal_reached_threshold: 1.5  # was 0.5m — matches reward goal_threshold
@@ -112,9 +122,11 @@ scene:
     # VERIFY first run: if boxes fall to floor not shelf, recalibrate via explore_rack.py
 
   items:
-    count: 54               # 18 racks x 3 shelf levels
+    count: 18               # one graspable box per rack (was 54 = 18 racks x 3 levels)
+    placement: "floor in front of rack (-y 0.5m), center z = size/2; within Franka reach ~0.85m"
+    target_selection: "commanded by goal_id one-hot (category), NOT detected"
     type: "rigid_cuboid"    # RigidObjectCfg + CuboidCfg (gravity + mass); NOT USD (DT box USDs lack RigidBodyAPI)
-    randomize_on_reset: true  # x,y jitter within shelf deck each episode (_randomize_box_poses)
+    randomize_on_reset: true  # x,y jitter around floor position each episode (_randomize_box_poses)
     masses_kg: { fragile: 2.0, regular: 6.0, heavy: 12.0 }
     colors: "brown shades (light=fragile, medium=regular, dark=heavy)"
     categories:
