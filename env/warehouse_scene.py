@@ -48,7 +48,11 @@ from isaaclab.sensors import ContactSensorCfg, TiledCameraCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-from env.layout_grid import island_rack_positions
+from env.layout_grid import (
+    RACK_POSITIONS as _RACK_POSITIONS_LG,
+    TARGET_BOX_SPECS as _TARGET_BOX_SPECS_LG,
+    island_rack_positions,
+)
 
 
 # ── Asset Paths ───────────────────────────────────────────────────────
@@ -175,7 +179,9 @@ ISLAND_COLS_X  = (-6.0, 0.0, 6.0)
 ISLAND_ROWS_Y  = (8.0, 1.0, -5.0)
 ISLAND_RACK_DX = 1.5
 
-RACK_POSITIONS = island_rack_positions(ISLAND_COLS_X, ISLAND_ROWS_Y, ISLAND_RACK_DX)
+# RACK_POSITIONS sourced from layout_grid (pure-Python, no Isaac import) so tests can
+# verify positions without launching Isaac Sim.
+RACK_POSITIONS = _RACK_POSITIONS_LG
 
 # Hardcoded shelf deck levels (top surface z, meters).
 # Rack height ~2.0m (measured 2026-05-30). 3 evenly-spaced levels.
@@ -190,25 +196,14 @@ SHELF_DECK_SIZE = (0.70, 0.70, 0.02)     # (width_x, depth_y, thickness_z) in me
 
 RACK_SHELF_Z = RACK_SHELF_LEVELS[-1]     # top shelf z (kept for explore_scene hint)
 
-# 54 boxes: 18 racks × 3 shelf levels.
-# Category per slot = (rack_idx + level_idx) % 3 → each rack gets all 3 types, one per level.
-# Example rack 0: level 0=fragile, level 1=regular, level 2=heavy.
-#          rack 1: level 0=regular, level 1=heavy,   level 2=fragile.  (rotated)
-_BOX_CATS   = ("fragile", "regular", "heavy")
-_BOX_SIZES  = (BOX_SMALL_SIZE, BOX_MED_SIZE, BOX_LARGE_SIZE)
-_BOX_MASSES = BOX_MASSES
+# 18 target boxes: one per rack, on the FLOOR in front of the rack (within Franka reach).
+# Category cycles fragile/regular/heavy by rack index -> 6 of each across 18 racks.
+# Boxes are graspable rigid bodies; the commanded box is selected at runtime by goal_id.
+# Sourced from layout_grid (pure-Python) so tests can verify specs without Isaac Sim.
+TARGET_BOX_SPECS: list[tuple[str, float, float, tuple[float, float, float]]] = _TARGET_BOX_SPECS_LG
 
-ITEM_SPECS: list[tuple[str, float, float, tuple[float, float, float]]] = []
-_cat_cnt = {"fragile": 0, "regular": 0, "heavy": 0}
-for _i, (_rx, _ry, _) in enumerate(RACK_POSITIONS):
-    for _j, _sz in enumerate(RACK_SHELF_LEVELS):
-        _ci   = (_i + _j) % 3
-        _cat  = _BOX_CATS[_ci]
-        _size = _BOX_SIZES[_ci]
-        _mass = _BOX_MASSES[_ci]
-        _name = f"{_cat}_{_cat_cnt[_cat]}_l{_j}"
-        _cat_cnt[_cat] += 1
-        ITEM_SPECS.append((_name, _size, _mass, (_rx, _ry, _sz + _size / 2.0)))
+# Back-compat alias: env code iterates ITEM_SPECS.
+ITEM_SPECS = TARGET_BOX_SPECS
 
 ZONE_SIZE  = (3.0, 3.0, 0.02)
 ZONE_SPECS = [
@@ -416,7 +411,7 @@ class WarehouseSceneCfg(InteractiveSceneCfg):
 
         - 18 racks (static USD)
         - 54 shelf decks (18 racks × 3 levels, invisible CuboidCfg — solid collision surface)
-        - 54 boxes (RigidObjectCfg — gravity, each spawns 5cm above its target shelf deck)
+        - 18 boxes (RigidObjectCfg — gravity, one per rack on the floor in front, within Franka reach)
         - 11 props (static USD)
         """
         for i, rack_pos in enumerate(RACK_POSITIONS):

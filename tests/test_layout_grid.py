@@ -36,3 +36,23 @@ def test_item_z_sits_on_shelf():
     assert size == 0.21
     assert mass == 2.0
     assert abs(pos[2] - (1.5 + 0.105)) < 1e-9
+
+
+def test_target_box_specs_count_and_reachability():
+    """18 target boxes, one per rack, on the floor and within Franka reach of rack front."""
+    from env.layout_grid import TARGET_BOX_SPECS, RACK_POSITIONS
+
+    assert len(TARGET_BOX_SPECS) == len(RACK_POSITIONS) == 18
+    for name, size, mass, pos in TARGET_BOX_SPECS:
+        # box rests on the floor: center z == half the cube height
+        assert abs(pos[2] - size / 2.0) < 1e-6, f"{name} not floor-resting (z={pos[2]})"
+        # each box sits within 0.85 m (Franka reach) of some rack front in the xy-plane
+        near = min(((pos[0] - rx) ** 2 + (pos[1] - ry) ** 2) ** 0.5 for rx, ry, _ in RACK_POSITIONS)
+        assert near <= 0.85, f"{name} unreachable (nearest rack {near:.2f} m)"
+
+
+def test_target_box_categories_cycle():
+    """Categories cycle fragile/regular/heavy across the 18 racks."""
+    from env.layout_grid import TARGET_BOX_SPECS
+    cats = [name.split("_")[0] for name, *_ in TARGET_BOX_SPECS]
+    assert cats.count("fragile") == cats.count("regular") == cats.count("heavy") == 6

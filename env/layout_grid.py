@@ -6,6 +6,18 @@ from __future__ import annotations
 
 _CATEGORIES = ("fragile", "regular", "heavy")
 
+# ── Module-level constants matching warehouse_scene.py defaults ───────────────
+# Exported so tests can verify box specs without importing Isaac Lab / pxr.
+BOX_SMALL_SIZE: float = 0.21
+BOX_MED_SIZE:   float = 0.32
+BOX_LARGE_SIZE: float = 0.52
+BOX_MASSES: tuple[float, float, float] = (2.0, 6.0, 12.0)
+
+ISLAND_COLS_X:    tuple[float, ...] = (-6.0, 0.0, 6.0)
+ISLAND_ROWS_Y:    tuple[float, ...] = (8.0, 1.0, -5.0)
+ISLAND_RACK_DX:   float = 1.5
+BOX_FRONT_OFFSET: float = 0.5  # meters in -y from rack center
+
 
 def island_rack_positions(
     cols_x: tuple[float, ...],
@@ -47,3 +59,41 @@ def item_specs(
         counters[cat] += 1
         out.append((name, size, mass, (x, y, shelf_z + size / 2.0)))
     return out
+
+
+def target_box_specs(
+    rack_positions: list[tuple[float, float, float]],
+    sizes: tuple[float, float, float],
+    masses: tuple[float, float, float],
+    front_offset: float,
+) -> list[tuple[str, float, float, tuple[float, float, float]]]:
+    """18 floor-level target boxes, one per rack, within Franka reach.
+
+    Category cycles fragile/regular/heavy by rack index (6 of each).
+    Box center z = size/2 (floor-resting). Box placed front_offset meters
+    in -y from rack center (toward shipping area).
+    Returns list of (name, size, mass, (x, y, z)).
+    """
+    counters = {c: 0 for c in _CATEGORIES}
+    out: list[tuple[str, float, float, tuple[float, float, float]]] = []
+    for i, (rx, ry, _) in enumerate(rack_positions):
+        cat  = _CATEGORIES[i % 3]
+        size = sizes[i % 3]
+        mass = masses[i % 3]
+        name = f"{cat}_{counters[cat]}"
+        counters[cat] += 1
+        out.append((name, size, mass, (rx, ry - front_offset, size / 2.0)))
+    return out
+
+
+# ── Pre-computed module-level instances (importable without Isaac Lab) ────────
+RACK_POSITIONS: list[tuple[float, float, float]] = island_rack_positions(
+    ISLAND_COLS_X, ISLAND_ROWS_Y, ISLAND_RACK_DX
+)
+
+TARGET_BOX_SPECS: list[tuple[str, float, float, tuple[float, float, float]]] = target_box_specs(
+    RACK_POSITIONS,
+    (BOX_SMALL_SIZE, BOX_MED_SIZE, BOX_LARGE_SIZE),
+    BOX_MASSES,
+    BOX_FRONT_OFFSET,
+)
