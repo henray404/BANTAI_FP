@@ -339,6 +339,9 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         self._boxes_by_cat = {
             c: [n for (n, *_) in TARGET_BOX_SPECS if n.startswith(c)] for c in self._cat_names
         }
+        # env-local resting z per box (shelf surface + size/2) — lift is measured against this,
+        # NOT absolute world z (a shelf box already sits ~0.8m up).
+        self._box_rest_z = {n: pos[2] for (n, _s, _m, pos) in TARGET_BOX_SPECS}
         N, dev = self.num_envs, self.device
         self.goal_id_buf = torch.zeros(N, 3, device=dev)
         self.box_cat_idx = torch.zeros(N, dtype=torch.long, device=dev)
@@ -386,11 +389,11 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         self.holding[env_ids] = False
 
     def _randomize_box_poses(self, env_ids: torch.Tensor) -> None:
-        """Random x,y jitter for the 18 floor boxes within their footprint area.
+        """Random x,y jitter for the 18 bottom-shelf boxes within their shelf-deck area.
 
         Called AFTER super()._reset_idx() so it overrides scene.reset() default positions.
-        Each box keeps its resting z (size/2 + 5cm drop) but gets a new random x,y offset.
-        Velocities zeroed to prevent carry-over from previous episode.
+        Each box keeps its shelf resting z (shelf surface + size/2 + 5cm drop) but gets a new
+        random x,y offset. Velocities zeroed to prevent carry-over from previous episode.
         """
         if env_ids.numel() == 0:
             return
@@ -443,10 +446,16 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         ee_world = robot.data.body_pos_w[:, ee]
         j = robot.joint_names.index("panda_finger_joint1")
         closed = robot.data.joint_pos[:, j] < 0.0175   # < half of open (0.035)
-        box_lift = torch.stack([
+        # lift = how far the box has risen above its shelf resting height (env-local z compare).
+        cur_z = torch.stack([
             self.scene[self.target_box_name[e]].data.root_pos_w[e, 2]
             for e in range(self.num_envs)
         ])
+        rest_z = torch.tensor(
+            [self._box_rest_z[self.target_box_name[e]] for e in range(self.num_envs)],
+            device=self.device,
+        ) + self.scene.env_origins[:, 2]
+        box_lift = cur_z - rest_z
         newly = grasp_success(self.ee_pos, self.box_pos, closed, box_lift) & (~self.holding)
         lost = grasp_lost(self.holding, self.ee_pos, self.box_pos) | (~closed & self.holding)
         self.grasp_event = newly

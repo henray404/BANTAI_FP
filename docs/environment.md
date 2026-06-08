@@ -99,7 +99,7 @@ Walls: primitive concrete cuboids (building shell USD deferred — SubUSDs 1.2GB
 
 ### Items (Graspable Boxes)
 
-~18 boxes, one shelf level, category cycling by rack index (fragile/regular/heavy). **Rigid bodies** (physics ON) — must be graspable. Placed on floor / low shelf within Franka reach (~0.85m). Reachability is a hard constraint: any box that can be a target must spawn inside the arm workspace from a feasible base pose.
+~18 boxes, one per rack on the **bottom shelf** (z≈0.72m surface), category cycling by rack index (fragile/regular/heavy). **Rigid bodies** (physics ON) — must be graspable. Bottom shelf only: Franka (mounted ~0.5m up on Ridgeback, reach ~0.85m) covers z≈0–1.35m, so bottom (0.72m) is reachable, mid (1.32m) borderline, top (1.93m) out of reach. Reachability is a hard constraint.
 
 | Category | USD | Size | Zone |
 |---|---|---|---|

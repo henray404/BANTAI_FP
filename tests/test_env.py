@@ -110,15 +110,15 @@ def run_tests(num_envs: int) -> list[Result]:
             obs, reward, term, trunc, _ = env.step(action)
         _record(results, "env.step() runs 10 steps", True)
 
-        # Verify box physics: floor boxes rest at ~size/2 and must not sink through the floor.
+        # Verify box physics: boxes rest on the bottom shelf (~0.72m surface) — not fallen to floor.
         from env.warehouse_scene import ITEM_SPECS
-        sunk = 0
+        fallen = 0
         for name, _, _, _ in ITEM_SPECS:
             box = env._env.scene[name]
             z = box.data.root_pos_w[0, 2].item()
-            if z < 0.03:  # below ground plane = sunk through
-                sunk += 1
-        _record(results, "Physics: Boxes rest on floor (z > 0.03)", sunk == 0, f"Sunk: {sunk}")
+            if z < 0.5:  # below bottom-shelf surface = fell off the shelf
+                fallen += 1
+        _record(results, "Physics: Boxes rest on bottom shelf (z > 0.5)", fallen == 0, f"Fallen: {fallen}")
             
     except Exception as e:
         _record(results, "env.step() / physics check", False, repr(e))

@@ -16,7 +16,10 @@ BOX_MASSES: tuple[float, float, float] = (2.0, 6.0, 12.0)
 ISLAND_COLS_X:    tuple[float, ...] = (-6.0, 0.0, 6.0)
 ISLAND_ROWS_Y:    tuple[float, ...] = (8.0, 1.0, -5.0)
 ISLAND_RACK_DX:   float = 1.5
-BOX_FRONT_OFFSET: float = 0.5  # meters in -y from rack center
+# Bottom shelf surface z (mirrors warehouse_scene.RACK_SHELF_LEVELS[0]). The Franka, mounted
+# ~0.5m up on the Ridgeback, reaches ~0 to ~1.35m, so only the BOTTOM shelf (0.72m) is a
+# reliable grasp target — mid (1.32m) is borderline, top (1.93m) out of reach.
+BOTTOM_SHELF_Z:   float = 0.72351
 
 
 def island_rack_positions(
@@ -65,13 +68,12 @@ def target_box_specs(
     rack_positions: list[tuple[float, float, float]],
     sizes: tuple[float, float, float],
     masses: tuple[float, float, float],
-    front_offset: float,
+    shelf_z: float,
 ) -> list[tuple[str, float, float, tuple[float, float, float]]]:
-    """18 floor-level target boxes, one per rack, within Franka reach.
+    """18 target boxes, one per rack, resting on the BOTTOM shelf (within Franka reach).
 
     Category cycles fragile/regular/heavy by rack index (6 of each).
-    Box center z = size/2 (floor-resting). Box placed front_offset meters
-    in -y from rack center (toward shipping area).
+    Box sits on the shelf deck at the rack center: center z = shelf_z + size/2.
     Returns list of (name, size, mass, (x, y, z)).
     """
     counters = {c: 0 for c in _CATEGORIES}
@@ -82,7 +84,7 @@ def target_box_specs(
         mass = masses[i % 3]
         name = f"{cat}_{counters[cat]}"
         counters[cat] += 1
-        out.append((name, size, mass, (rx, ry - front_offset, size / 2.0)))
+        out.append((name, size, mass, (rx, ry, shelf_z + size / 2.0)))
     return out
 
 
@@ -95,5 +97,5 @@ TARGET_BOX_SPECS: list[tuple[str, float, float, tuple[float, float, float]]] = t
     RACK_POSITIONS,
     (BOX_SMALL_SIZE, BOX_MED_SIZE, BOX_LARGE_SIZE),
     BOX_MASSES,
-    BOX_FRONT_OFFSET,
+    BOTTOM_SHELF_Z,
 )

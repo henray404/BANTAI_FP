@@ -39,16 +39,19 @@ def test_item_z_sits_on_shelf():
 
 
 def test_target_box_specs_count_and_reachability():
-    """18 target boxes, one per rack, on the floor and within Franka reach of rack front."""
-    from env.layout_grid import TARGET_BOX_SPECS, RACK_POSITIONS
+    """18 target boxes, one per rack, resting on the bottom shelf within Franka reach."""
+    from env.layout_grid import TARGET_BOX_SPECS, RACK_POSITIONS, BOTTOM_SHELF_Z
 
     assert len(TARGET_BOX_SPECS) == len(RACK_POSITIONS) == 18
+    # box xy must equal its rack center (sitting on that rack's shelf)
+    rack_xy = {(round(rx, 4), round(ry, 4)) for rx, ry, _ in RACK_POSITIONS}
     for name, size, mass, pos in TARGET_BOX_SPECS:
-        # box rests on the floor: center z == half the cube height
-        assert abs(pos[2] - size / 2.0) < 1e-6, f"{name} not floor-resting (z={pos[2]})"
-        # each box sits within 0.85 m (Franka reach) of some rack front in the xy-plane
-        near = min(((pos[0] - rx) ** 2 + (pos[1] - ry) ** 2) ** 0.5 for rx, ry, _ in RACK_POSITIONS)
-        assert near <= 0.85, f"{name} unreachable (nearest rack {near:.2f} m)"
+        # box rests on the bottom shelf deck: center z == shelf surface + half the cube
+        assert abs(pos[2] - (BOTTOM_SHELF_Z + size / 2.0)) < 1e-6, \
+            f"{name} not on bottom shelf (z={pos[2]})"
+        # box top must stay within the Franka vertical reach ceiling (~1.35m)
+        assert pos[2] + size / 2.0 <= 1.35, f"{name} top {pos[2] + size/2.0:.2f}m out of reach"
+        assert (round(pos[0], 4), round(pos[1], 4)) in rack_xy, f"{name} not on a rack ({pos[0]},{pos[1]})"
 
 
 def test_target_box_categories_cycle():

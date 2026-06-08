@@ -136,7 +136,7 @@ Both feed the same staged reward; CA-SLOPE reshapes the dense terms, Visual HER 
 | Robot | Ridgeback-Franka, **arm active** | was arm tucked |
 | Racks | 9 rack islands (3×3 grid) | unchanged — define the navigation maze |
 | Boxes | **~18** graspable, one shelf level | was 54; loose boxes reduced |
-| Box placement | floor / low shelf, within Franka reach (~0.85m) | NEW constraint — must be reachable |
+| Box placement | bottom shelf (z≈0.72m), within Franka reach | NEW constraint — bottom rack level only (mid/top out of reach) |
 | Delivery zones | 3 colored (orange / cyan / purple) | unchanged |
 | Box categories | 21cm fragile→orange, 32cm regular→cyan, 52cm heavy→purple | unchanged sizes, no longer detected |
 | Episode length | **1000 steps** (100s @ 10Hz) | was 600 (pick-place needs longer horizon) |
