@@ -31,7 +31,7 @@ from gymnasium import spaces  # noqa: E402
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from env.warehouse_env import GOAL_EMB_DIM, IMG_HW, WarehouseEnvCfg, WarehouseGymEnv  # noqa: E402
+from env.warehouse_env import IMG_HW, WarehouseEnvCfg, WarehouseGymEnv  # noqa: E402
 
 
 Result = tuple[str, bool, str]
@@ -66,9 +66,13 @@ def run_tests(num_envs: int) -> list[Result]:
     expected_shapes = {
         "pixels":   (num_envs, 3, IMG_HW, IMG_HW),
         "position": (num_envs, 3),
-        "goal":     (num_envs, 3),
-        "goal_emb": (num_envs, GOAL_EMB_DIM),
         "heading":  (num_envs, 2),
+        "goal":     (num_envs, 3),
+        "goal_id":  (num_envs, 3),
+        "ee_pos":   (num_envs, 3),
+        "gripper":  (num_envs, 1),
+        "holding":  (num_envs, 1),
+        "box_pos":  (num_envs, 3),
     }
     for key, want in expected_shapes.items():
         try:
@@ -77,33 +81,44 @@ def run_tests(num_envs: int) -> list[Result]:
         except Exception as e:
             _record(results, f"obs['{key}'].shape", False, repr(e))
 
+    # goal_id is a valid one-hot over 3 categories; holding is 0/1.
+    try:
+        gid = obs["goal_id"]
+        ok = gid.shape[-1] == 3 and torch.allclose(
+            gid.sum(dim=-1), torch.ones(gid.shape[0], device=gid.device))
+        _record(results, "obs['goal_id'] is one-hot (rows sum to 1)", ok, f"sum={gid.sum(dim=-1).tolist()}")
+        hold = obs["holding"]
+        _record(results, "obs['holding'] is 0/1", bool(((hold == 0) | (hold == 1)).all()), f"vals={hold.flatten().tolist()}")
+    except Exception as e:
+        _record(results, "obs['goal_id']/['holding'] value check", False, repr(e))
+
     try:
         a = env.action_space
         ok = (
             isinstance(a, spaces.Box)
-            and a.shape == (2,)
+            and a.shape == (6,)
             and float(a.low.min()) == -1.0
             and float(a.high.max()) == 1.0
         )
-        _record(results, "action_space == Box(-1, 1, shape=(2,))", ok, str(a))
+        _record(results, "action_space == Box(-1, 1, shape=(6,))", ok, str(a))
     except Exception as e:
         _record(results, "action_space check", False, repr(e))
 
     try:
         for _ in range(10):
-            action = np.random.uniform(-1.0, 1.0, size=(num_envs, 2)).astype(np.float32)
+            action = np.random.uniform(-1.0, 1.0, size=(num_envs, 6)).astype(np.float32)
             obs, reward, term, trunc, _ = env.step(action)
         _record(results, "env.step() runs 10 steps", True)
-        
-        # Verify box physics (boxes shouldn't fall through shelves)
+
+        # Verify box physics: floor boxes rest at ~size/2 and must not sink through the floor.
         from env.warehouse_scene import ITEM_SPECS
-        fallen = 0
+        sunk = 0
         for name, _, _, _ in ITEM_SPECS:
             box = env._env.scene[name]
             z = box.data.root_pos_w[0, 2].item()
-            if z < 0.5:
-                fallen += 1
-        _record(results, "Physics: Boxes remain on shelves (z > 0.5)", fallen == 0, f"Fallen: {fallen}")
+            if z < 0.03:  # below ground plane = sunk through
+                sunk += 1
+        _record(results, "Physics: Boxes rest on floor (z > 0.03)", sunk == 0, f"Sunk: {sunk}")
             
     except Exception as e:
         _record(results, "env.step() / physics check", False, repr(e))
@@ -127,6 +142,42 @@ def run_tests(num_envs: int) -> list[Result]:
         _record(results, "reward shape == (num_envs,)", ok, f"got={tuple(reward.shape)}")
     except Exception as e:
         _record(results, "reward shape check", False, repr(e))
+
+    # ── Obs/drive track motion — regression for IsaacLab #1268 + #2664 ───────────────
+    # Pre-fix, position/heading read the FIXED articulation root → frozen at spawn (#1268),
+    # and "forward" always slid along world +x ignoring heading (#2664). These checks drive
+    # the base and assert the obs actually CHANGE (the suite only checked shapes before) and
+    # that forward follows the chassis heading.
+    #
+    # Drives are SHORT + SLOW on purpose: at full 1.5 m/s the robot can leave the room bounds
+    # within ~1 s, auto-reset mid-measurement, and report a meaningless spawn-to-spawn jump.
+    # 0.4 forward × 12 steps (1.2 s) ≈ 0.4 m — stays in bounds, never reaches the south goal.
+    try:
+        obs, _ = env.reset()
+        pos0  = obs["position"][0, :2].clone()
+        head0 = obs["heading"][0].clone()                            # [cos(yaw), sin(yaw)]
+        fwd = np.array([[0.4, 0.0, 0.0, 0.0, 0.0, 0.0]] * num_envs, dtype=np.float32)  # gentle forward, arm idle
+        for _ in range(12):
+            obs, *_ = env.step(fwd)
+        disp = obs["position"][0, :2] - pos0
+        dn = float(torch.norm(disp))
+        # Frozen root → dn≈0 (exactly spawn); a live chassis obs moves ~0.3–0.4 m here.
+        _record(results, "Obs: position tracks forward motion (Δ>0.1m)", dn > 0.1, f"Δ={dn:.3f}m")
+        if dn > 0.1:  # body-frame drive (#2664): displacement should align with facing direction
+            cos_align = float(torch.dot(disp / dn, head0))
+            _record(results, "Drive: forward follows heading (cos>0.6)", cos_align > 0.6, f"cos={cos_align:.2f}")
+        else:
+            _record(results, "Drive: forward follows heading (cos>0.6)", True, "skipped: robot blocked")
+
+        obs, _ = env.reset()
+        head0 = obs["heading"][0].clone()
+        turn = np.array([[0.0, 0.5, 0.0, 0.0, 0.0, 0.0]] * num_envs, dtype=np.float32)  # spin in place, arm idle
+        for _ in range(12):
+            obs, *_ = env.step(turn)
+        dhead = float(torch.norm(obs["heading"][0] - head0))
+        _record(results, "Obs: heading tracks yaw rotation (Δ>0.05)", dhead > 0.05, f"Δ={dhead:.3f}")
+    except Exception as e:
+        _record(results, "Obs/drive motion-tracking", False, repr(e))
 
     try:
         env.close()
