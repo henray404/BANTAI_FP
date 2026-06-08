@@ -1,51 +1,61 @@
-# Visual Category-Aware World Model untuk Warehouse Robot
-> Final Project Deep Learning  
+# Visual Category-Aware World Model untuk Warehouse Pickup Robot
+> Final Project Deep Learning (pure DL — NLP/PCD dropped 2026-06-08)
 > Tim 5 Orang · 6 Minggu · RTX 5050 · Ubuntu / Windows 11
 
+> ⚠️ **REDESIGN 2026-06-08:** CLIP (NLP) + YOLO (PCD) **dihapus**. Task: nav-only → **pick→carry→place**.
+> Kategori box diberi langsung lewat `goal_id` one-hot (tanpa deteksi, tanpa teks). Lengan Franka AKTIF.
+> CA-SLOPE + Visual HER **tetap** (CA-SLOPE baca kategori dari `goal_id`, bukan vision).
+> Spec lengkap: **`docs/superpowers/specs/2026-06-08-pure-dl-pickup-redesign.md`**.
+
 > ⚠️ **Dokumen ini punya 2 lapis:** bagian **"Status Implementasi"** di bawah = kondisi NYATA
-> per 2026-06-03 (hasil audit kode). Sisanya = desain/visi awal (sebagian belum dibangun,
-> sebagian sudah berubah). Untuk jadwal realistis lihat **`docs/timeline_terbaru.md`**.
+> per 2026-06-08 (hasil audit kode). Sisanya = desain/visi (sebagian belum dibangun).
+> Untuk jadwal realistis lihat **`docs/timeline_terbaru.md`**.
 
 ---
 
-## Status Implementasi (per 2026-06-03 — audit kode, BUKAN rencana)
+## Status Implementasi (per 2026-06-08 — audit kode, BUKAN rencana)
 
 Ringkasan jujur kondisi workspace. Baca ini sebelum percaya bagian visi di bawahnya.
 
-### ✅ Sudah ada (kode P1 — Environment)
-- Scene warehouse 20×30 m: 9 island / 18 rack, 54 shelf deck, 54 box rigid (gravity + massa), 3 zona, props, dinding, dome light.
+### ✅ Sudah ada (kode P1 — Environment, task LAMA = nav single-goal)
+- Scene warehouse 20×30 m: 9 island / 18 rack, 54 shelf deck, 54 box rigid (gravity + massa), 3 zona, props, dinding, dome light. *(redesign: box turun ke ~18 graspable, satu shelf level)*
 - **Robot = Ridgeback-Franka mobile manipulator** (base holonomik Clearpath + lengan Franka Panda 7-DOF + gripper) — **bukan** AMR diff-drive / Carter / Jetbot lagi.
-- Base holonomik dipaksa diff-drive lewat mapping action `(2,)` → joint base (`_base_cmd`).
-- Obs dict: `pixels, position, goal, goal_emb (zeros), heading` + Gymnasium wrapper.
-- Reward nav: `delivery_success(+10)`, shaping jarak, time penalty, collision penalty. Termination: time_out, reached_goal, out_of_bounds.
+- Base holonomik dipaksa diff-drive lewat mapping action `(2,)` → joint base (`_base_cmd`). *(redesign: action → `(6,)` tambah lengan+gripper)*
+- Obs dict: `pixels, position, goal, goal_emb (zeros), heading` + Gymnasium wrapper. *(redesign: `goal_emb` → `goal_id(3)`, tambah `ee_pos, gripper, holding, box_pos`)*
+- Reward nav: `delivery_success(+10)`, shaping jarak, time penalty, collision penalty. *(redesign: → staged pick-place, lihat spec §4)*
 - Goal resampling per-env + randomisasi posisi box tiap reset. TiledCamera 64×64, contact sensor.
 - Script: `run_env.py`, `drive_robot.py` (teleop, camera-strip), `smoke_test.py` (auto base test). Test: `test_env.py`, `test_layout_grid.py`, `test_obs.py`. `layout_grid.py` (math murni).
 
-### 🔴 Blocker / belum terbukti jalan
-- **Camera SDP crash di RTX 5050 (Blackwell) masih OPEN.** Env RL butuh `pixels` → tidak bisa strip camera. `run_env.py` / `test_env.py` **belum pernah lolos end-to-end** di hardware ini. Hanya script camera-strip (teleop, smoke, explore) yang jalan. Lihat `bugs_errors/2026-05-22_sdp-camera-crash-blackwell.md`.
-- **Verifikasi first-run belum dilakukan** (karena env belum bisa run penuh): frame prismatic base (world vs body), nama body contact sensor (`base_link` masih tebakan untuk Ridgeback), box settle di shelf, VRAM muat.
+> ℹ️ Kode P1 di atas dibangun untuk task **nav single-goal lama**. Redesign 2026-06-08 (pickup) = migrasi env belum dikerjakan — lihat "Pickup migration" di `docs/environment.md` §12.
+
+### ✅ Blocker TUNTAS (dulu 🔴, sekarang clear)
+- **Camera SDP crash di RTX 5050 (Blackwell) RESOLVED** (2026-06-03) lewat downgrade driver NVIDIA 591.84 → 580.88 (DDU clean install) + 2 fix kode (contact-filter dihapus, `collision_penalty` shape). `test_env.py --num_envs 1` camera ON = **ALL PASS**. ⚠️ Pin driver di 580.88, jangan auto-update ke 591.x/595.x. Lihat `bugs_errors/2026-05-22_sdp-camera-crash-blackwell.md`.
+- **Verifikasi first-run SELESAI:** frame prismatic = world-frame → `_base_cmd`/teleop proyeksi yaw; contact body = `base_link` (verified); box settle di shelf (z>0.5, fallen=0); VRAM muat. **Root-state frozen bug ditemukan + fixed** (2026-06-04): obs/reward baca `body_pos_w["base_link"]`, bukan root yang beku. `test_env.py` = **ALL PASS 16/16** + 3 regression check. Lihat `bugs_errors/2026-06-04_ridgeback-root-state-frozen.md`.
+- **Sisa verify P1 (minor):** `run_env.py` windowed belum dites end-to-end; action smoothing/effort tuning sebelum training serius (base bisa keluar bounds <1 dtk @1.5 m/s).
 
 ### 🟡 Didesain tapi BELUM dibangun
-- **Pickup task** (pick → carry → deliver pakai lengan). Spec approved: `docs/superpowers/specs/2026-06-01-arm-pickup-design.md`. Belum ada: `pickup_manager.py`, STATION_SPECS, scripted IK, obs key `carrying`, reward pickup. **Task aktual sekarang = navigasi single-goal saja.**
+- **Pickup task** (pick → carry → place pakai lengan). Spec approved 2026-06-08: `docs/superpowers/specs/2026-06-08-pure-dl-pickup-redesign.md` (revisi `2026-06-01-arm-pickup-design.md` tanpa YOLO/CLIP). Belum ada: arm IK (DifferentialIKController) wiring, obs `holding/box_pos`, reward staged. **Task aktual di kode sekarang = navigasi single-goal; pickup = migrasi belum jalan.**
 
 ### ❌ Belum ada sama sekali (P2–P5, seluruh stack ML)
 - DreamerV3, CNN encoder, RSSM, replay buffer — **tidak ada di repo**.
-- Category-Aware SLOPE, Visual HER — **tidak ada**.
-- CLIP (`goal_emb` masih zeros), YOLOv8 — **tidak ada**.
+- Category-Aware SLOPE, Visual HER — **tidak ada** (tetap in-scope, owner P5/P3 — lihat spec §4b).
 - Baseline SAC/PPO, training pipeline, W&B, eksperimen — **tidak ada**.
 - **Repo ini saat ini = 100% pekerjaan P1 (environment).**
 
-### ⚠️ Utang dokumentasi (dokumen ≠ kode)
-- `CLAUDE.md` → masih tulis Carter v1 + misi "nav-only Phase 1".
-- `configs/env_config.yaml` → masih `carter_v1`, 18 box static, props forklift/palletasm.
-- `docs/CHANGES.md` → dokumentasikan Carter **v2.4**, padahal kode sudah Ridgeback-Franka.
-- Bagian "Environment dan Robot" + "Task Hierarchy" di dokumen ini sudah dikoreksi di bawah.
+> ❌ **CLIP + YOLO = DIHAPUS dari scope** (2026-06-08), bukan "belum dibangun". Kategori box dikirim langsung lewat `goal_id` one-hot.
+
+### 📝 Status dokumentasi (per 2026-06-08, redesign pickup)
+- `CLAUDE.md` → diupdate ke **pickup**: obs `goal_id`+manip keys, action `(6,)`, reward staged, roles baru, CA-SLOPE/HER.
+- `docs/environment.md` → diupdate ke pickup: task, obs, action, reward, items rigid graspable, arm aktif, "Pickup migration" checklist §12.
+- `docs/superpowers/specs/2026-06-08-pure-dl-pickup-redesign.md` → spec baru (source of truth).
+- ⚠️ **`configs/env_config.yaml`** → masih state lama (`items.count: 54`, action 2-dim, nav reward). Belum diupdate ke pickup — perlu disinkronkan saat migrasi env.
+- `docs/CHANGES.md` → changelog historis (entri Carter/box-physics/camera tetap; entri redesign pickup belum ditambah).
 
 ---
 
 ## Satu Kalimat
 
-Robot gudang beroda belajar mengenali kategori item secara visual dan mengantar item ke zona yang benar — tanpa diprogram eksplisit, hanya dari pengalaman dan imajinasi.
+Robot gudang mobile-manipulator belajar mengambil box kategori yang diperintahkan dan mengantarnya ke zona warna yang benar — tanpa diprogram eksplisit, hanya dari pengalaman dan imajinasi.
 
 ---
 
@@ -106,7 +116,7 @@ tanpa menyentuh environment nyata
       │
       ▼
 Aksi dieksekusi di environment nyata
-[linear_velocity, angular_velocity]
+[base_lin, base_ang, ee_dx, ee_dy, ee_dz, gripper]
       │
       ▼
 Kalau episode gagal → Visual HER relabel
@@ -149,47 +159,36 @@ Kontribusi proyek ini: **Visual HER** merelabel berdasarkan kategori visual yang
 
 ## Environment dan Robot
 
-**Warehouse Simulation** dibangun di Isaac Lab 5.1 dari NVIDIA. Layout: 9 island rak (3×3) di tengah scene dengan box kardus di rak, tiga zona delivery berwarna di sisi shipping (selatan). Posisi box di-randomize setiap episode. Robot spawn random di area receiving (utara), yaw random.
+**Warehouse Simulation** dibangun di Isaac Lab 5.1 dari NVIDIA. Layout: 9 island rak (3×3) di tengah scene dengan box graspable (~18, satu shelf level, dalam jangkauan lengan ~0.85m), tiga zona delivery berwarna di sisi shipping (selatan). Posisi box di-randomize setiap episode. Robot spawn random di area receiving (utara), yaw random.
 
-> 🔧 **Koreksi vs kode (2026-06-03):** kategori item dikodekan **ukuran box**, bukan warna primer.
-> Implementasi nyata di `env/warehouse_scene.py`:
-> - **21 cm → fragile** → zone_A (oranye `1.0,0.9,0.0`)
-> - **32 cm → regular** → zone_B (cyan `0.0,0.9,0.9`)
-> - **52 cm → heavy** → zone_C (ungu `0.7,0.0,0.9`)
-> Box diberi gradasi coklat (light/medium/dark), bukan merah/hijau/biru. Encoding ukuran ini
-> yang dipakai YOLO/CLIP. (Skema warna merah/hijau/biru di paragraf di bawah = rencana lama.)
+Kategori box dikodekan **ukuran**, dan **diberi langsung ke robot lewat `goal_id` one-hot** (BUKAN dideteksi — YOLO/CLIP dihapus 2026-06-08):
+- **21 cm → fragile** → zone_A (oranye `1.0,0.9,0.0`)
+- **32 cm → regular** → zone_B (cyan `0.0,0.9,0.9`)
+- **52 cm → heavy** → zone_C (ungu `0.7,0.0,0.9`)
 
-Item dikodekan dengan warna (rencana lama — TIDAK dipakai di kode):
-- ~~Merah → fragile~~ → **diganti ukuran 21 cm**
-- ~~Hijau → regular~~ → **diganti ukuran 32 cm**
-- ~~Biru → heavy~~ → **diganti ukuran 52 cm**
+Box diberi gradasi coklat (light/medium/dark). `goal_id` memilih sekaligus **box target** + **zona tujuan**. CA-SLOPE membaca kategori dari `goal_id` ini untuk reward landscape per-kategori.
 
-Zona tujuan dikodekan dengan warna lantai:
-- Oranye → zona A, tujuan fragile items (21 cm)
-- Cyan → zona B, tujuan regular items (32 cm)
-- Ungu → zona C, tujuan heavy items (52 cm)
-
-> 🔧 **Koreksi robot (2026-06-03):** robot **bukan** AMR diff-drive murni lagi. Kode pakai
-> **Ridgeback-Franka mobile manipulator** (base holonomik + lengan Franka 7-DOF + gripper).
-> Action space tetap `(2,)` `[linear, angular]` — base holonomik sengaja dikekang jadi
-> diff-drive supaya kontrak tidak berubah. Lengan ada untuk **pickup task** (masih spec, belum
-> dibangun); saat ini lengan cuma diam di pose tucked. Kamera onboard 64×64 RGB. Locomotion +
-> lengan dari Isaac Lab, fokus proyek di learning algorithm bukan kontrol robot.
+> 🔧 **Robot:** **Ridgeback-Franka mobile manipulator** (base holonomik Clearpath + lengan Franka 7-DOF + gripper).
+> Action space `(6,)` `[base_lin, base_ang, ee_dx, ee_dy, ee_dz, gripper]` — base holonomik dikekang jadi
+> diff-drive; lengan **AKTIF** via DifferentialIKController (EE top-down) untuk **pickup task** (approved 2026-06-08).
+> Kamera onboard 64×64 RGB. Locomotion + lengan + IK dari Isaac Lab, fokus proyek di learning algorithm.
 
 ---
 
 ## Task Hierarchy
 
-Task dibagi tiga stage dengan curriculum — robot mulai dari yang paling mudah dan naik bertahap:
+Curriculum pickup (lihat spec §7) — robot mulai dari yang paling mudah:
 
-**Stage 1 — Navigate** ✅ *(SUDAH diimplement)*: robot bergerak dari spawn ke zona, menghindari rak dan dinding. Reward di kode: `+10` saat masuk radius zona (1.5 m) + shaping jarak.
+**Curr 1 — Carry/Place** (box pre-grasped `holding=1` saat spawn): belajar bawa → lepas di zona. Isolasi delivery.
+**Curr 2 — Grasp** (robot spawn di box): belajar approach → grasp. Isolasi manipulasi.
+**Curr 3 — Full chain**: spawn receiving → navigate → grasp → carry → place. `goal` xyz masih diberi.
+**Curr 4 — Anneal goal**: `goal` zona xyz anneal → zeros; robot andalkan `goal_id` + pixels. `box_pos` tetap diberi.
 
-**Stage 2 — Pick** 🟡 *(SPEC saja, belum dibangun)*: robot identifikasi box kategori benar dan pick pakai lengan Franka (scripted IK + kinematic attach). Detail: `docs/superpowers/specs/2026-06-01-arm-pickup-design.md`.
+Reward staged auto-switch di flag `holding`: Phase A (approach+grasp, `+5` grasp) → Phase B (carry+place, `+10` delivery). Lihat spec §4.
 
-**Stage 3 — Deliver** 🟡 *(SPEC saja, belum dibangun)*: robot bawa box ke zona yang cocok, lepas. Reward pickup/deliver/mistake belum ada di kode.
-
-> 🔧 **Status nyata:** hanya Stage 1 yang jalan (itupun belum terverifikasi end-to-end karena
-> camera blocker). Stage 2–3 = desain mobile-manipulator yang baru di-spec 2026-06-01.
+> 🔧 **Status nyata (2026-06-08):** kode env masih task **nav single-goal lama** (Stage 1, terverifikasi
+> end-to-end, `test_env.py` ALL PASS 16/16, camera resolved 2026-06-03). Curriculum pickup di atas =
+> redesign baru di-spec 2026-06-08, **migrasi env belum dikerjakan**.
 
 ---
 
@@ -223,11 +222,11 @@ Metrik evaluasi: task success rate, sample efficiency (reward vs environment ste
 
 | Person | Role | Tanggung Jawab |
 |---|---|---|
-| P1 | Simulation & Environment | Isaac Lab setup, warehouse scene, Gymnasium wrapper, kamera |
-| P2 | DreamerV3 Base + Encoder | CNN encoder, RSSM, replay buffer, modifikasi arsitektur |
-| P3 | Category-Aware SLOPE | Quantile reward head, potential landscape per kategori, QCE loss |
-| P4 | Visual HER | Relabeling logic berbasis visual, goal representation, ablation |
-| P5 | Training + Paper | Pipeline training, W&B monitoring, eksperimen, paper, demo video |
+| P1 (Henry) | Environment & Integration (+ arm IK) | Isaac Lab scene, obs/action/reward, wiring DifferentialIKController, kamera |
+| P2 | World Model core | CNN encoder, RSSM, decoder, world-model training |
+| P3 | Policy + Visual HER | Actor-critic, replay buffer, training loop, HER relabel di buffer |
+| P4 | Manipulation | Grasp detection, pick-place curriculum, EE control tuning (pair P1) |
+| P5 | Experiments + CA-SLOPE | CA-SLOPE reward (RQ2 ablation), eval metrics, baseline SAC/PPO, W&B, paper |
 
 ---
 
@@ -252,33 +251,38 @@ Metrik evaluasi: task success rate, sample efficiency (reward vs environment ste
 
 ```python
 obs = {
+    # navigation
     "pixels":   Tensor(batch, 3, 64, 64),   # kamera onboard
-    "position": Tensor(batch, 3),            # posisi robot xyz
-    "goal":     Tensor(batch, 3),            # posisi target xyz (anneal→zeros di curriculum)
-    "goal_emb": Tensor(batch, 512),          # embedding goal (CLIP; masih zeros sampai P4)
-    "heading":  Tensor(batch, 2),            # [cos(yaw), sin(yaw)] — SUDAH ada di kode (2026-06-01)
-    # "carrying": Tensor(batch, 1),          # RENCANA pickup task (spec, belum ada di kode)
+    "position": Tensor(batch, 3),            # posisi base robot xyz
+    "heading":  Tensor(batch, 2),            # [cos(yaw), sin(yaw)]
+    "goal":     Tensor(batch, 3),            # zona delivery xyz (anneal→zeros)
+    "goal_id":  Tensor(batch, 3),            # one-hot [orange,cyan,purple] — pilih box + zona (ganti goal_emb 2026-06-08)
+    # manipulation
+    "ee_pos":   Tensor(batch, 3),            # end-effector xyz, base frame
+    "gripper":  Tensor(batch, 1),            # bukaan finger 0..1
+    "holding":  Tensor(batch, 1),            # 1.0 kalau box target ke-grasp
+    "box_pos":  Tensor(batch, 3),            # box target xyz — UNANNEALED
 }
 
-action_space = Box(-1.0, 1.0, shape=(2,))
-# [linear_velocity, angular_velocity]
+action_space = Box(-1.0, 1.0, shape=(6,))
+# [base_lin, base_ang, ee_dx, ee_dy, ee_dz, gripper]
 
 buffer.add(obs, action, reward, next_obs, done)   # buffer BELUM ada di repo
-buffer.her_relabel(trajectory)              # Visual HER — BELUM ada
+buffer.her_relabel(trajectory)              # Visual HER (P3) — BELUM ada
 buffer.sample(batch_size) → batch_dict
 ```
 
-> 🔧 **Catatan:** obs `heading` sudah ditambahkan ke kode (P2 harus handle di RSSM). `carrying`
-> baru rencana pickup task. `buffer` + Visual HER belum diimplement sama sekali.
+> 🔧 **Catatan:** obs `heading` sudah di kode lama. `goal_id` + 4 key manipulasi = redesign pickup
+> (belum di kode). `buffer` + Visual HER belum diimplement.
 
 ---
 
 ## Stack Teknis
 
 ```
-Simulator    : Isaac Lab 5.x (NVIDIA)
-Robot        : AMR differential drive (Isaac Lab built-in)
-World Model  : DreamerV3 (github.com/NM512/dreamer-pytorch)
+Simulator    : Isaac Lab 5.1 (NVIDIA)
+Robot        : Ridgeback-Franka mobile manipulator (holonomik dipaksa diff-drive; Isaac 5.1 Nucleus USD)
+World Model  : DreamerV3 (github.com/NM512/dreamerv3-torch)
 Reward       : Category-Aware SLOPE (custom extension)
 Data Aug     : Visual HER (custom extension)
 Training     : PyTorch, Weights & Biases

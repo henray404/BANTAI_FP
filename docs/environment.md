@@ -1,39 +1,46 @@
 # Warehouse Environment — Design Document
 
-**Project**: Text-Conditioned World Model for Visual Category-Aware Warehouse Robot
+**Project**: Visual Goal-Conditioned World Model for Warehouse Pickup (pure DL — CLIP/YOLO removed 2026-06-08)
 **Person**: P1 — Environment & Integration
 **Stack**: Isaac Lab 5.1 · Python 3.11 · RTX 5050 8GB · CUDA 12.8
-**Last updated**: 2026-05-30 (Layout v2)
+**Last updated**: 2026-06-08 (pickup redesign — see `docs/superpowers/specs/2026-06-08-pure-dl-pickup-redesign.md`)
+
+> ⚠️ **2026-06-08 REDESIGN.** Task changed nav-only → pick→carry→place. CLIP + YOLO removed.
+> Box category given via `goal_id` one-hot (no detection, no text). Arm now ACTIVE (DifferentialIKController).
+> Sections below being migrated; spec is source of truth.
 
 ---
 
 ## 1. Mission
 
-Robot spawns in the receiving area (north). A random delivery zone is assigned as the goal. Robot navigates through the rack-island storage field to reach the correct colored zone (south). Episode ends on success (within 0.5m of zone) or timeout (60s).
+Robot spawns in the receiving area (north). A `goal_id` one-hot selects a category → it commands both the target box (by size) and the matching color zone. Robot navigates to the box, grasps it, carries it to the matching zone (south), and places it. Episode ends on delivery success or timeout (100s).
 
 ```
 SPAWN (receiving, north)
         |
         v
-read goal zone (A=orange / B=cyan / C=purple)
+read goal_id one-hot (A=orange / B=cyan / C=purple) -> target box + target zone
         |
         v
-navigate through 9 rack islands, avoid obstacles
+navigate through 9 rack islands to commanded box
         |
         v
-reach zone within 0.5m radius -> +1, episode ends
+grasp box (Franka arm, DifferentialIKController) -> holding=1, +5
         |
-   timeout 60s -> truncated
+        v
+carry to matching color zone, place -> +10, episode ends
+        |
+   timeout 100s -> truncated
 ```
 
-**Phase 1 = navigation only.** No item pickup (no manipulator). Items are visual landmarks for CLIP/YOLO.
+**Task = pick→carry→place**, single box per episode. Arm ACTIVE.
 
-**Text instruction per zone** (for Person 4 CLIP encoding):
-| Zone | Color | Instruction |
+**Category given directly via `goal_id`** (no CLIP text, no YOLO detection). Mapping:
+| Zone | Color | Box category / size |
 |---|---|---|
-| zone_A | orange | "deliver small box to orange zone" |
-| zone_B | cyan | "deliver medium box to cyan zone" |
-| zone_C | purple | "deliver large box to purple zone" |
+| zone_A | orange | fragile / 21cm |
+| zone_B | cyan | regular / 32cm |
+| zone_C | purple | heavy / 52cm |
 
 ---
 
@@ -90,9 +97,9 @@ Walls: primitive concrete cuboids (building shell USD deferred — SubUSDs 1.2GB
 | Rack sim height | TBD — run explore_rack.py (was ~2.0m for old Rack_A) |
 | RACK_SHELF_Z | 1.5 m — RETUNE after explore_rack.py (carried over from Rack_A) |
 
-### Items (Visual Landmarks)
+### Items (Graspable Boxes)
 
-18 boxes, one per rack, category cycling by rack index (fragile/regular/heavy). **Static props** — no physics, stay on shelves across episode resets.
+~18 boxes, one shelf level, category cycling by rack index (fragile/regular/heavy). **Rigid bodies** (physics ON) — must be graspable. Placed on floor / low shelf within Franka reach (~0.85m). Reachability is a hard constraint: any box that can be a target must spawn inside the arm workspace from a feasible base pose.
 
 | Category | USD | Size | Zone |
 |---|---|---|---|
@@ -100,7 +107,7 @@ Walls: primitive concrete cuboids (building shell USD deferred — SubUSDs 1.2GB
 | regular | CubeBox_A05_32cm_PR_NVD_01.usd | 0.32 m | zone_B (cyan) |
 | heavy | CubeBox_A07_52cm_PR_NVD_01.usd | 0.52 m | zone_C (purple) |
 
-Size encodes category for CLIP/YOLO. Items are NOT picked up — navigation task only.
+Size encodes category. Category given directly via `goal_id` one-hot — NOT detected. Target box is grasped and delivered.
 
 ### Delivery Zones (Goals)
 
@@ -129,32 +136,43 @@ All static USD assets, scale (0.01, 0.01, 0.01).
 
 ## 3. Robot
 
+> 🔧 **Diperbarui 2026-06-08.** Robot diganti dari Jetbot/Carter ke Ridgeback-Franka mobile
+> manipulator (2026-06-01). **Tidak ada wheel kinematics** — base holonomik dipaksa diff-drive
+> lewat dummy joint velocity.
+
 | Param | Value |
 |---|---|
-| Model | Jetbot (NVIDIA Nucleus USD, placeholder for custom AMR) |
-| Type | Wheeled differential-drive |
+| Model | Ridgeback-Franka (Clearpath holonomik + Franka Panda 7-DOF + gripper; Isaac 5.1 Nucleus USD) |
+| Type | Holonomic base **dipaksa diff-drive** (kontrak action tidak berubah) |
+| Joints | 3 dummy base (`prismatic_x/y` + `revolute_z`) + 7 arm (`panda_joint1..7`) + 2 finger = 12 |
 | Spawn | Receiving-north: x[-8,+8], y[+11,+14], yaw random [-π,π] |
+| Arm | **ACTIVE** — driven via DifferentialIKController (top-down EE). Pickup task approved 2026-06-08. |
 
 ### Action Space
 
 ```python
-action = [linear_vel, angular_vel]   # shape (2,), values in [-1, 1]
+action = [base_lin, base_ang, ee_dx, ee_dy, ee_dz, gripper]   # shape (6,), values in [-1, 1]
 ```
 
-Conversion in `WarehouseGymEnv._diff_drive()`:
+Base mapping di `warehouse_env.py::_base_cmd` (body-frame yaw projection, BUKAN wheel kinematics):
 ```python
-lin_mps = action[:,0] * 1.0    # max 1.0 m/s
-ang_rps = action[:,1] * 2.0    # max 2.0 rad/s
-v_left  = (lin_mps - 0.5 * 0.118 * ang_rps) / 0.032   # rad/s -> left wheel
-v_right = (lin_mps + 0.5 * 0.118 * ang_rps) / 0.032   # rad/s -> right wheel
+# base prismatic = world-frame → proyeksi yaw supaya "maju" ikut heading
+vx = base_lin * cos(yaw)
+vy = base_lin * sin(yaw)     # base dipaksa diff-drive; strafe murni tidak dipakai
+wz = base_ang
+# drive 3 dummy base joints: [dummy_base_prismatic_x, _y, dummy_base_revolute_z] = [vx, vy, wz]
 ```
+
+Arm mapping: `(ee_dx, ee_dy, ee_dz)` = EE position delta in base frame → DifferentialIKController → `panda_joint1..7`. EE orientation fixed top-down. `gripper`: >0 open, ≤0 close (`panda_finger_joint1/2`).
 
 | Param | Value | Source |
 |---|---|---|
-| MAX_LIN_SPEED | 1.0 m/s | DreamerNav (2025) standard |
-| MAX_ANG_SPEED | 2.0 rad/s | — |
-| WHEEL_BASE | 0.118 m | Jetbot spec |
-| WHEEL_RADIUS | 0.032 m | Jetbot spec |
+| MAX_LIN_SPEED | 1.5 m/s | warehouse_env.py |
+| MAX_ANG_SPEED | 1.5 rad/s | warehouse_env.py |
+
+> ⚠️ Tanpa wheel kinematics (`WHEEL_BASE`/`WHEEL_RADIUS` tidak relevan untuk Ridgeback).
+> Catatan: base bisa keluar bounds <1 dtk @1.5 m/s — perlu action smoothing/effort tuning sebelum training serius.
+> Arm IK: copy reference envs `Isaac-Reach-Franka-v0` / `Isaac-Lift-Cube-Franka-v0`.
 
 ---
 
@@ -162,11 +180,11 @@ v_right = (lin_mps + 0.5 * 0.118 * ang_rps) / 0.032   # rad/s -> right wheel
 
 | Param | Value |
 |---|---|
-| Type | **TiledCameraCfg** (CameraCfg crashes on RTX 5050 Blackwell — see bugs_errors/) |
+| Type | **TiledCameraCfg** (SDP crash di RTX 5050 Blackwell RESOLVED via driver 580.88, 2026-06-03 — see bugs_errors/) |
 | Resolution | 64 x 64 pixels |
 | Channels | RGB, float [0,1] |
 | Update period | 0.1s (10Hz) |
-| FOV | ~48.7° |
+| FOV | ~60° (focal_length 18mm) |
 | Offset from robot | (0.05, 0.0, 0.10) m, forward-facing |
 
 64x64 is DreamerV3 standard across all 150+ benchmarks.
@@ -177,10 +195,17 @@ v_right = (lin_mps + 0.5 * 0.118 * ang_rps) / 0.032   # rad/s -> right wheel
 
 ```python
 obs = {
+    # --- navigation ---
     "pixels":   Tensor(batch, 3, 64, 64),   # camera RGB, float [0,1]
-    "position": Tensor(batch, 3),            # robot xyz, env-local
-    "goal":     Tensor(batch, 3),            # target zone xyz (curriculum: will anneal to zeros)
-    "goal_emb": Tensor(batch, 512),          # CLIP embedding — zeros until P4 wires it
+    "position": Tensor(batch, 3),            # robot base xyz, env-local
+    "heading":  Tensor(batch, 2),            # [cos(yaw), sin(yaw)]
+    "goal":     Tensor(batch, 3),            # delivery zone xyz (anneals to zeros)
+    "goal_id":  Tensor(batch, 3),            # one-hot [orange,cyan,purple] — selects box + zone (replaced goal_emb 2026-06-08)
+    # --- manipulation ---
+    "ee_pos":   Tensor(batch, 3),            # end-effector xyz, base frame
+    "gripper":  Tensor(batch, 1),            # finger opening 0..1
+    "holding":  Tensor(batch, 1),            # 1.0 if target box grasped
+    "box_pos":  Tensor(batch, 3),            # target box xyz, env-local — UNANNEALED
 }
 ```
 
@@ -188,44 +213,39 @@ obs = {
 
 ### Why no velocity observation?
 
-Council review (3 independent voices) + TEEP RMFS (2025) = unanimous decision:
-DreamerV3's RSSM is recurrent — it reconstructs motion implicitly from pixel sequences. Adding an explicit velocity vector is redundant and would break the P2/P4 interface contract. TEEP trained a warehouse world model successfully without velocity.
+Council review (3 independent voices) + TEEP RMFS (2025): DreamerV3's RSSM is recurrent — it reconstructs motion implicitly from pixel sequences. Explicit velocity is redundant. (Proprioception `ee_pos`/`gripper`/`holding` is kept because arm state is not inferable from base-mounted pixels.)
 
-### goal xyz — Curriculum plan (Pass 5)
+### goal xyz — Curriculum plan
 
-The `goal` xyz leaks the exact target location, which short-circuits CLIP/language learning. Plan:
+`goal` (delivery zone xyz) anneals to zeros so the policy relies on `goal_id` + pixels for delivery. `box_pos` stays UNANNEALED (grasp needs precision).
 
 ```
-Phase 1 (now):   goal = zone xyz           <- easy baseline, debug env
-Phase 2 (Pass 5): goal = zone xyz * alpha  <- anneal alpha from 1.0 to 0.0
-Phase 3 (final): goal = zeros              <- robot relies on goal_emb (CLIP) only
+Phase 1: goal = zone xyz           <- easy baseline, debug env
+Phase 2: goal = zone xyz * alpha   <- anneal alpha 1.0 -> 0.0
+Phase 3: goal = zeros              <- robot relies on goal_id + pixels
 ```
-
-Coordinate with P4 when wiring CLIP.
 
 ---
 
 ## 6. Reward Function
 
-**Current (Pass 1 — stable baseline, do not change until Pass 3)**
+**Staged pick-place** (switches on `holding` flag) — see spec §4.
 
 ```python
-reward = +1.0 * delivery_success    # sparse: within 0.5m of goal zone
-       - 0.05 * dist(robot, goal)   # dense shaping
-       - 0.001 * time_penalty       # per step
+# Phase A — approach + grasp (NOT holding)
+- 0.01 * dist(ee_pos, box_pos)        # dense: hand -> target box
++ 5.0  * grasp_success                # box gripped + lifted off shelf
+# Phase B — carry + place (holding)
+- 0.01 * dist(box_pos, goal_zone)     # dense: box -> correct color zone
++ 10.0 * delivery_success             # correct box in correct color zone, released
+# Always-on
+- 0.005 * time_penalty                # efficiency
+- 5.0   * collision                   # chassis contact > 5N
+- 2.0   * drop_penalty                # box dropped mid-carry outside zone
 ```
 
-### Upcoming Rebalance (Pass 3 + Pass 4)
-
-Grounded in DreamerNav (2025) Table 7 and TEEP RMFS (2025):
-
-| Term | DreamerNav ref | Current | Target |
-|---|---|---|---|
-| Goal reward | +100 | +1 | +10..+100 |
-| Collision | -50 | 0 | **-50 (current -0.1 plan is negligible, use -50)** |
-| Heading align | cos(theta_goal) | missing | add cos(theta_goal) |
-| Time penalty | -0.5/step | -0.001 | -0.1..-0.5 |
-| Distance shaping | +5 subgoal | -0.05*dist | potential-based delta |
+- `grasp_success` (+5 intermediate) bootstraps learning — policy gets signal before full chain. Pure-sparse rejected (too hard).
+- `delivery_success` requires category→color match (`goal_id`). Wrong zone = no reward.
 
 **Rule**: land each reward change alone. Never change two things at once — can't diagnose which broke training.
 
@@ -235,8 +255,8 @@ Grounded in DreamerNav (2025) Table 7 and TEEP RMFS (2025):
 
 | Condition | Trigger |
 |---|---|
-| `time_out` | 60s = 600 steps @ 10Hz |
-| `reached_goal` | robot within 0.5m of goal zone |
+| `time_out` | 100s = 1000 steps @ 10Hz |
+| `delivery_success` | correct box (per `goal_id`) inside matching color zone, released |
 | `out_of_bounds` | robot outside x +-9.5m or y +-14.5m |
 
 ---
@@ -247,7 +267,7 @@ Grounded in DreamerNav (2025) Table 7 and TEEP RMFS (2025):
 |---|---|---|
 | Physics dt | 0.005s (200Hz) | Isaac Lab standard |
 | Decimation | 20 | 200/20 = 10Hz policy (DreamerNav standard) |
-| Episode | 60s x 10Hz = 600 steps | ~25m traverse @1m/s + island navigation |
+| Episode | 100s x 10Hz = 1000 steps | nav + grasp + carry + place horizon |
 | num_envs | 2 (default) | VRAM-safe on 8GB for 30m room + props |
 | env_spacing | 32.0m | > 30m largest room dim + 2m buffer |
 
@@ -336,13 +356,22 @@ pytest tests/test_layout_grid.py -v
 ### Pass 5 — Curriculum
 - [ ] DreamerNav 6-level goal-distance curriculum ([2-5]m -> [2-inf]m)
 - [ ] Success radius curriculum: 1.4m -> 1.0m
-- [ ] goal xyz anneal: alpha 1.0 -> 0.0 (coordinate with P4 CLIP wiring)
+- [ ] goal xyz anneal: alpha 1.0 -> 0.0 (box_pos stays unannealed)
+
+### Pickup migration (2026-06-08 redesign — NEW work)
+- [ ] Boxes static → rigid bodies, placed within Franka reach (~0.85m)
+- [ ] Action space (2,) → (6,): add `ee_dx/dy/dz, gripper`
+- [ ] Wire DifferentialIKController (copy `Isaac-Lift-Cube-Franka-v0`)
+- [ ] Obs: add `ee_pos, gripper, holding, box_pos`; replace `goal_emb` → `goal_id`
+- [ ] Reward: staged grasp/place + `grasp_success`/`drop_penalty`
+- [ ] Grasp-success detection (finger contact + box lift threshold)
+- [ ] VRAM re-measure (~18 boxes + arm IK)
 
 ### Deferred
 - Building shell (Warehouse_A modular) — SubUSDs 1.2GB, too heavy
-- Custom AMR swap (Jetbot is placeholder)
+- 6-DOF EE orientation control (v1 = fixed top-down)
+- cuRobo motion planning (v1 = DifferentialIKController only)
 - Domain randomization (friction, lighting)
-- Pickup mechanic (Phase 2, needs manipulator)
 
 ---
 
@@ -353,13 +382,13 @@ pytest tests/test_layout_grid.py -v
 | Navigate-to-zone mission | DreamerNav (2025), TEEP RMFS (2025) |
 | 64x64 RGB | DreamerV3 Hafner et al. 2023 (all 150+ benchmarks) |
 | 10Hz control, 1 m/s | DreamerNav (2025) Table 7 |
-| 600 steps / 60s episode | DreamerNav max 400 steps @10Hz = 40s, ours slightly longer for 30m room |
+| 1000 steps / 100s episode | nav + grasp + carry + place needs longer horizon than nav-only |
 | No velocity obs | Council 3-voice + TEEP RMFS (trains without it) |
 | goal xyz anneal curriculum | Council Decision F |
 | Collision >> goal reward | DreamerNav (-50 vs +100), TEEP (-3 vs +2) |
 | Heading cos(theta) reward | DreamerNav Table 7 |
 | Island-block layout | TEEP reference image + user preference |
-| Items static (not rigid) | Navigation task only; no manipulator; static = no reset-fall bug |
+| Items rigid (graspable) | Pickup task (2026-06-08); boxes must be grasped — physics ON |
 | scale=(0.01,...) on USDs | Measured: Isaac Lab UsdFileCfg has no auto metersPerUnit conversion |
 
 Full paper list: `docs/referensi.md`
