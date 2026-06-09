@@ -2,7 +2,9 @@
 #
 # Usage:
 #   python scripts/run_env.py --num_envs 1                 # windowed, single env
-#   python scripts/run_env.py --num_envs 4 --headless      # headless, 4 envs
+#   python scripts/run_env.py --num_envs 1 --headless      # headless, single env
+# NOTE: keep num_envs=1. 8GB RTX 5050 only fits ONE Ridgeback-Franka + 54 boxes; higher
+# values saturate VRAM, corrupt the GPU PhysX view, and crash in get_dof_velocities().
 #
 # AppLauncher MUST be created here, before any isaaclab imports from env/.
 # See bugs_errors/2026-05-15_double-applaunch-crash.md.
@@ -18,7 +20,7 @@ from isaaclab.app import AppLauncher
 
 # ── CLI + AppLauncher ─────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Run warehouse robot environment")
-parser.add_argument("--num_envs", type=int, default=4, help="Number of parallel envs")
+parser.add_argument("--num_envs", type=int, default=1, help="Number of parallel envs (1 only — Ridgeback-Franka + 54 boxes saturate 8GB RTX 5050; >1 corrupts the GPU PhysX view → CUDA illegal memory access in get_dof_velocities)")
 parser.add_argument("--steps", type=int, default=200, help="Total env steps to run")
 parser.add_argument("--print_every", type=int, default=20, help="Print reward stats every N steps")
 
@@ -42,7 +44,7 @@ from env.warehouse_env import WarehouseEnvCfg, WarehouseGymEnv  # noqa: E402
 
 
 def random_policy_loop(env: WarehouseGymEnv, total_steps: int, print_every: int) -> None:
-    """Drive the env with random [linear, angular] actions; print reward stats."""
+    """Drive the env with random (6,) pickup actions; print reward stats."""
     obs, _ = env.reset()
     print(f"[OK] reset complete. obs keys = {list(obs.keys())}")
     for key, val in obs.items():
@@ -52,7 +54,8 @@ def random_policy_loop(env: WarehouseGymEnv, total_steps: int, print_every: int)
     for step in range(total_steps):
         if not simulation_app.is_running():
             break
-        action = np.random.uniform(-1.0, 1.0, size=(env.num_envs, 2)).astype(np.float32)
+        # (6,) pickup action: [base_lin, base_ang, ee_dx, ee_dy, ee_dz, gripper] (was (2,) nav).
+        action = np.random.uniform(-1.0, 1.0, size=(env.num_envs, 6)).astype(np.float32)
         obs, reward, terminated, truncated, _ = env.step(action)
         cumulative += reward
         if (step + 1) % print_every == 0:

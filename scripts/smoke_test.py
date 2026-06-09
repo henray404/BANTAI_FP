@@ -91,6 +91,15 @@ def _base_xy(robot, body_idx: int) -> torch.Tensor:
     return robot.data.body_pos_w[0, body_idx, :2].clone()
 
 
+def _root_xy(robot) -> torch.Tensor:
+    """Return env-0 world XY of the articulation ROOT link (the fixed `world` link).
+
+    Used to demonstrate the IsaacLab fixed-root gotcha: root_pos_w stays put while the
+    chassis (base_link) translates via the dummy joints. See IsaacLab issue #1268.
+    """
+    return robot.data.root_pos_w[0, :2].clone()
+
+
 def main() -> None:
     """Load robot, log names, drive forward / yaw / forward, print Gotcha-B verdict."""
     sim, scene = _build_scene()
@@ -107,6 +116,9 @@ def main() -> None:
     print(f"[smoke] joint names: {robot.joint_names}")
     print(f"[smoke] base joints (vx,vy,wz order): {base_names} -> ids {base_ids}")
     print(f"[smoke] base_link body idx: {bidx}")
+    # Health check: the welded Ridgeback must be fixed-base with `world` as root, else the dummy
+    # base joints won't translate the chassis (see bugs_errors/2026-06-09_ridgeback-floating-base.md).
+    print(f"[smoke] is_fixed_base = {robot.is_fixed_base}  root body = {robot.body_names[0]}")
 
     # Settle a few steps (arm holds tucked pose via position control).
     _drive(sim, scene, robot, base_ids, [0.0, 0.0, 0.0], 40)
@@ -116,10 +128,13 @@ def main() -> None:
 
     # ── Phase 1: forward (prismatic_x = +speed), yaw fixed ───────────
     p0 = _base_xy(robot, bidx)
+    r0 = _root_xy(robot)                 # root link XY (expected to stay put — #1268)
     _drive(sim, scene, robot, base_ids, [args_cli.speed, 0.0, 0.0], args_cli.phase_steps)
     p1 = _base_xy(robot, bidx)
+    r1 = _root_xy(robot)
     dir1 = (p1 - p0)
     d1 = float(torch.linalg.norm(dir1))
+    d_root = float(torch.linalg.norm(r1 - r0))   # root displacement over same drive
 
     # ── Phase 2: yaw +90 deg (revolute_z), no translation ────────────
     _drive(sim, scene, robot, base_ids, [0.0, 0.0, 0.8], args_cli.phase_steps)
@@ -134,8 +149,21 @@ def main() -> None:
     dir2 = (p3 - p2)
     d2 = float(torch.linalg.norm(dir2))
 
-    # ── Verdict ───────────────────────────────────────────────────────
-    print("\n========== SMOKE: GOTCHA-B (prismatic frame) ==========")
+    # ── Verdict: ROOT-STATE gotcha (IsaacLab issue #1268) ─────────────
+    # If the chassis moved (d1) but root_pos_w did not (d_root~0), the env+reward MUST read
+    # body_pos_w[base_link] instead of root_pos_w, or position/heading/distance freeze at spawn.
+    print("\n========== SMOKE: ROOT-STATE (IsaacLab #1268) ==========")
+    print(f"[smoke] phase1 base_link disp |{d1:.3f} m|   root_pos_w disp |{d_root:.3f} m|")
+    if d1 > 0.02 and d_root < 0.02:
+        print("[smoke] VERDICT: ROOT FROZEN — root_pos_w stays put while base_link moves.")
+        print("[smoke]   -> env/reward MUST read body_pos_w[base_link], NOT root_pos_w (#1268).")
+    elif d_root >= 0.02:
+        print(f"[smoke] VERDICT: root_pos_w tracks motion ({d_root:.3f} m) — root read is OK.")
+    else:
+        print("[smoke] VERDICT: INCONCLUSIVE — chassis barely moved; check actuation/effort.")
+
+    # ── Verdict: prismatic frame (IsaacLab discussion #2664) ──────────
+    print("\n========== SMOKE: GOTCHA-B (prismatic frame, #2664) ==========")
     print(f"[smoke] phase1 forward disp: {dir1.tolist()}  |{d1:.3f} m|")
     print(f"[smoke] yaw applied phase2 : {dyaw:+.1f} deg")
     print(f"[smoke] phase3 forward disp: {dir2.tolist()}  |{d2:.3f} m|")

@@ -17,9 +17,17 @@ from isaaclab.sensors import ContactSensor
 
 
 def _robot_xy(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Return robot xy position relative to env origin, shape (num_envs, 2)."""
+    """Return robot CHASSIS xy relative to env origin, shape (num_envs, 2).
+
+    Reads body_pos_w["base_link"], NOT root_pos_w. The Ridgeback-Franka is a fixed-root
+    articulation whose root_pos_w stays at the spawn pose while the chassis moves via the dummy
+    base joints; reading the root froze every distance/termination at spawn (the robot never
+    appeared to approach the goal, so shaping/success/out-of-bounds were all wrong). See
+    IsaacLab issue #1268.
+    """
     asset: Articulation = env.scene[asset_cfg.name]
-    return asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    idx = asset.body_names.index("base_link")  # moving chassis body (NOT the fixed root)
+    return asset.data.body_pos_w[:, idx, :2] - env.scene.env_origins[:, :2]
 
 
 def _current_goal_xy(env: ManagerBasedRLEnv) -> torch.Tensor:

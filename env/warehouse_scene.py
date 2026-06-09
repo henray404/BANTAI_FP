@@ -105,6 +105,43 @@ SIGN_USD   = _usd("Safety/Floor_Signs/Warning_A/WarningSign_A01_PR_NVD_01.usd")
 # VERIFY on first run: base chassis BODY name (contact sensor) + dummy-joint chain frame
 # (if the base drives in a fixed world direction regardless of heading, _base_cmd must project
 # by yaw — see its comment).
+#
+# CRITICAL (2026-06-09): the Isaac 5.1 ridgeback_franka.usd ships NO base anchor, so the
+# articulation loads FLOATING (PhysX auto-roots at panda_link2). Driving the dummy holonomic
+# joints then never translates the chassis in world space — the `world` leaf link absorbs the
+# motion instead. We weld the `world` link to the stage world frame with a fixed joint at spawn
+# (see _spawn_ridgeback_welded below) so it becomes fixed-base, re-roots at `world`, and the base
+# drives correctly. Proof: base_link disp 0.00m -> 0.91m after weld. See
+# bugs_errors/2026-06-09_ridgeback-floating-base.md.
+def _weld_robot_world_links() -> None:
+    """Anchor every robot `world` link to the stage world frame with a fixed joint.
+
+    Scans the stage (handles 1..N cloned envs) and welds each `<...>/Robot/world` link so the
+    floating Ridgeback articulation becomes fixed-base. Idempotent. Run after the USD spawn,
+    before the physics view is created (i.e. before sim.reset()).
+    """
+    import omni.usd
+    from pxr import Sdf, Usd, UsdPhysics
+
+    stage = omni.usd.get_context().get_stage()
+    for prim in stage.Traverse():
+        if prim.GetName() != "world" or prim.GetParent().GetName() != "Robot":
+            continue
+        joint_path = Sdf.Path(f"{prim.GetParent().GetPath()}/base_world_anchor")
+        if stage.GetPrimAtPath(joint_path).IsValid():
+            continue  # already welded
+        fixed = UsdPhysics.FixedJoint.Define(stage, joint_path)
+        fixed.CreateBody1Rel().SetTargets([prim.GetPath()])  # body0 empty = stage world frame
+
+
+def _spawn_ridgeback_welded(prim_path, cfg, translation=None, orientation=None):
+    """Spawn the Ridgeback USD, then weld its `world` link (fix Isaac 5.1 floating base)."""
+    from isaaclab.sim.spawners.from_files import spawn_from_usd
+    prim = spawn_from_usd(prim_path, cfg, translation, orientation)
+    _weld_robot_world_links()
+    return prim
+
+
 RIDGEBACK_FRANKA_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=f"{ISAAC_NUCLEUS_DIR}/Robots/Clearpath/RidgebackFranka/ridgeback_franka.usd",
@@ -161,6 +198,10 @@ RIDGEBACK_FRANKA_CFG = ArticulationCfg(
         ),
     },
 )
+
+# Override the USD spawner with the welding wrapper so the floating base is anchored at spawn
+# (Isaac 5.1 ridgeback_franka.usd has no base anchor — see _spawn_ridgeback_welded above).
+RIDGEBACK_FRANKA_CFG.spawn.func = _spawn_ridgeback_welded
 
 
 # ── Room Geometry ─────────────────────────────────────────────────────

@@ -341,3 +341,47 @@ fixed `world` root link, not `base_link`); fix smoke test before trusting world-
 
 **Op note:** `simulation_app.close()` hangs on Blackwell after a clean run → leaves a zombie
 `python.exe` spinning a core + holding GPU mem. Kill stale processes between runs.
+
+---
+
+## 2026-06-04 — Root-state frozen fix (obs/reward read base_link; body-frame drive)
+
+Full write-up: `bugs_errors/2026-06-04_ridgeback-root-state-frozen.md`.
+
+**Problem:** The Ridgeback-Franka is a fixed-root articulation, so `root_pos_w` / `root_quat_w`
+stay at the spawn pose while the chassis (`base_link`) moves via the dummy base joints. The env
+read the root in 3 places → `obs["position"]`, `obs["heading"]`, and **all** reward/termination
+distances were frozen at spawn (navigation unlearnable). Separately, the dummy prismatic joints are
+world-framed, so `_base_cmd`'s `[lin, 0, ang]` always slid the robot along world +x regardless of
+heading. `test_env.py` passed 10/10 because it only checked obs **shapes**, never that they move.
+
+**Fix:**
+- `warehouse_env.py::robot_position` / `robot_heading` → read `body_pos_w["base_link"]` /
+  `body_quat_w["base_link"]` (was `root_pos_w` / `root_quat_w`).
+- `warehouse_reward.py::_robot_xy` → read `body_pos_w["base_link"]` (feeds success/shaping/
+  reached_goal/out_of_bounds).
+- `warehouse_env.py::_base_cmd` → yaw-project: `[lin·cos(yaw), lin·sin(yaw), ang]` (body-frame
+  drive on a world-frame base; keeps the (2,) contract). `drive_robot.py` teleop projects too.
+- `smoke_test.py` → prints `root_pos_w` vs `body_pos_w[base_link]` displacement (proves the gotcha).
+- `test_env.py` → new regression: position/heading must change under motion + forward follows
+  heading (short low-speed drives to stay in-bounds).
+
+**References:** IsaacLab #1268 (root state not updating on Ridgeback Franka), #2254, articulation_data
+API; IsaacLab discussion #2664 (mobile base yaw not updating xy translation — project control vectors
+by orientation). Links in the bug log.
+
+**Verified:** `python tests/test_env.py --num_envs 1` (camera ON, driver 580.88) → **ALL PASS
+(16/16)**: position Δ=0.188 m, forward-follows-heading cos=0.81, heading Δ=1.176 rad. This run also
+exited cleanly (no `close()` zombie observed — the hang may be intermittent; keep killing stale
+`python.exe` to be safe).
+
+**Corrections to the 2026-06-03 note above:** the "Smoke base-motion verdict INCONCLUSIVE —
+measurement bug (`_base_xy` reads the fixed `world` root link)" is now resolved — `smoke_test.py`
+reads `body_pos_w[base_link]` and additionally prints the root displacement for contrast. The same
+root-vs-chassis gotcha was the actual cause; it had been fixed in the smoke script but not in the
+env/reward until now.
+
+### Follow-up (separate, NOT part of this fix)
+At full 1.5 m/s the base can leave the 20×30 m room within ~1 s; a hard velocity step also showed
+large transients (a >6 m single-window jump = env auto-reset mid-drive). Consider action smoothing /
+effort-velocity-limit tuning before serious training.

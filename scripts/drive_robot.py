@@ -81,6 +81,7 @@ def main() -> None:
 
     # Resolve the 3 base joints in our fixed order (vx, vy, wz).
     base_ids, base_names = robot.find_joints(BASE_JOINTS, preserve_order=True)
+    base_link_idx = robot.body_names.index("base_link")  # moving chassis (yaw source; #1268)
     print(f"[drive] base joints (order = vx, vy, wz): {base_names} -> ids {base_ids}")
     print(f"[drive] robot bodies: {robot.body_names}")
     print(f"[drive] robot joints: {robot.joint_names}")
@@ -96,12 +97,35 @@ def main() -> None:
     print(keyboard)
     print("[drive] Focus the viewport window and use the arrow keys / Z / X to drive. Ctrl-C to quit.")
 
+    step = 0
     while simulation_app.is_running():
-        cmd = keyboard.advance().unsqueeze(0)            # (1, 3) = [vx, vy, wz]
+        cmd = keyboard.advance().unsqueeze(0)            # (1, 3) = [vx, vy, wz] body-frame intent
+        # Dummy prismatic joints are WORLD-framed (IsaacLab #2664): rotate the linear command by
+        # the current chassis yaw so "forward" follows heading. At spawn (yaw=0) this is identity,
+        # so it does NOT change the "won't move at start" case (that is viewport focus, see below).
+        q = robot.data.body_quat_w[0, base_link_idx]     # (w, x, y, z)
+        yaw = torch.atan2(2.0 * (q[0] * q[3] + q[1] * q[2]), 1.0 - 2.0 * (q[2] ** 2 + q[3] ** 2))
+        cy, sy = torch.cos(yaw), torch.sin(yaw)
+        vx_b, vy_b = cmd[0, 0].clone(), cmd[0, 1].clone()
+        cmd[0, 0] = vx_b * cy - vy_b * sy                # world-x velocity (prismatic_x)
+        cmd[0, 1] = vx_b * sy + vy_b * cy                # world-y velocity (prismatic_y)
         robot.set_joint_velocity_target(cmd, joint_ids=base_ids)
         scene.write_data_to_sim()
         sim.step()
         scene.update(dt=sim.get_physics_dt())
+
+        # Diagnostic (throttled ~5 Hz, silent when idle): bisects "robot won't move".
+        # Press a key and watch the console:
+        #   - nothing prints      -> viewport window NOT focused (carb keyboard gets no events)
+        #   - cmd != 0, vel ~= 0  -> command reaches joints but drive/physics not tracking
+        #   - cmd != 0, vel != 0  -> working (look at the viewport, robot IS moving)
+        # Remember: only Arrow Up/Down (vx) + Z/X (yaw) are bound; Left/Right need --strafe > 0.
+        if step % 40 == 0:
+            cmd_l = [round(v, 3) for v in cmd[0].tolist()]
+            base_vel = [round(v, 3) for v in robot.data.joint_vel[0, base_ids].tolist()]
+            if any(abs(v) > 1e-6 for v in cmd_l + base_vel):
+                print(f"[drive] cmd(vx,vy,wz)={cmd_l}  base_joint_vel={base_vel}")
+        step += 1
 
 
 if __name__ == "__main__":
