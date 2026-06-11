@@ -402,7 +402,10 @@ class WarehouseSceneCfg(InteractiveSceneCfg):
     robot: ArticulationCfg = RIDGEBACK_FRANKA_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
     camera: TiledCameraCfg = TiledCameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/onboard_cam",
+        # Parent under base_link (the MOVING chassis), NOT /Robot (the welded `world` root, which
+        # stays fixed at origin — IsaacLab #1268). Mounting on /Robot froze the camera at spawn so
+        # every frame was identical while the robot drove. base_link prim verified at :445.
+        prim_path="{ENV_REGEX_NS}/Robot/base_link/onboard_cam",
         update_period=0.1,
         height=64,
         width=64,
