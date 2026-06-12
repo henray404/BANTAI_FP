@@ -1,0 +1,18 @@
+# training/configs/ppo_baseline.yaml — experiment C5 (model-free baseline, optional).
+experiment: ppo_baseline
+algo: ppo
+seeds: [0, 1]
+timesteps: 500000
+env:
+  num_envs: 1
+ppo:
+  learning_rate: 3.0e-4
+  n_steps: 2048
+  batch_size: 256
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+logging:
+  wandb_project: bantai-warehouse
+  logdir: training/results/ppo_baseline

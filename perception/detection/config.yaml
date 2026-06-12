@@ -1,0 +1,11 @@
+# perception/detection/config.yaml
+# YOLOv8 detection hyperparameters for the warehouse box detector.
+model: yolov8n.pt        # nano — 64x64 input, 3 classes, fast; bump to s if accuracy low
+imgsz: 64                # camera native resolution (DreamerV3 standard)
+epochs: 100
+batch: 64
+patience: 20
+data: dataset.yaml       # relative to this folder
+project: runs            # ultralytics output dir (perception/detection/runs)
+name: warehouse_boxes
+device: 0                # GPU 0; set to 'cpu' to train without CUDA

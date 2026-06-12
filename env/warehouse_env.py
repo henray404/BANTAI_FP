@@ -87,8 +87,36 @@ def goal_position(env: ManagerBasedRLEnv) -> torch.Tensor:
 
 
 def goal_embedding(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """Return placeholder goal embedding (zeros). Filled by Person 4 with CLIP."""
-    return torch.zeros(env.num_envs, GOAL_EMB_DIM, device=env.device)
+    """Return CLIP text embedding (num_envs, 512) for each env's current goal zone.
+
+    Wired by Person 4. Falls back to zeros — preserving the original contract — when
+    CLIP (open-clip-torch) is not installed or the goal/zone buffers aren't ready,
+    so the env never crashes on a clean install. The 3 instruction embeddings are
+    computed once and cached on the env (`_clip_encoder`); per step this is just an
+    index gather, no CLIP forward pass.
+    """
+    zeros = torch.zeros(env.num_envs, GOAL_EMB_DIM, device=env.device)
+    goal_pos = getattr(env, "goal_pos", None)
+    zone_pos = getattr(env, "_zone_pos", None)
+    if goal_pos is None or zone_pos is None:
+        return zeros
+
+    enc = getattr(env, "_clip_encoder", None)
+    if enc is None:
+        try:
+            from perception.language.clip_encoder import CLIPInstructionEncoder
+
+            enc = CLIPInstructionEncoder(device=str(env.device))
+        except Exception:
+            enc = False  # mark "tried, unavailable" so we don't retry every step
+        env._clip_encoder = enc
+    if not enc or not getattr(enc, "available", False):
+        return zeros
+
+    from perception.language.clip_encoder import zone_index_from_goal_pos
+
+    idx = zone_index_from_goal_pos(goal_pos, zone_pos)
+    return enc.embed_zone_indices(idx).to(env.device)
 
 
 def robot_heading(

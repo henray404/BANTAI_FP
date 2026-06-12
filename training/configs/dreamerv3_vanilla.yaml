@@ -1,0 +1,21 @@
+# training/configs/dreamerv3_vanilla.yaml — experiment C1 (world-model baseline).
+# These override the vendored NM512 defaults (see models/dreamerv3/config.py
+# WAREHOUSE_OVERRIDES). Keep keys in sync with that override dict.
+experiment: dreamerv3_vanilla
+algo: dreamerv3
+seeds: [0, 1]
+steps: 200000
+env:
+  num_envs: 1
+  action_repeat: 1
+  time_limit: 600
+dreamer:
+  prefill: 2000
+  batch_size: 16
+  batch_length: 64
+  train_ratio: 512
+  encoder_mlp_keys: "position|goal|goal_emb|heading"
+  encoder_cnn_keys: "image"
+logging:
+  wandb_project: bantai-warehouse
+  logdir: training/results/dreamerv3
