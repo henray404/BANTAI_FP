@@ -1,0 +1,12 @@
+# perception/detection/dataset.yaml
+# YOLOv8 dataset spec — produced by render_dataset.py.
+# Paths are relative to this dataset.yaml location (set `path` to the dataset root).
+path: ./dataset
+train: images/train
+val: images/val
+
+# Size-coded box categories (match env/warehouse_scene.py + instructions.py order)
+names:
+  0: fragile   # 21 cm box  -> zone_A (orange)
+  1: regular   # 32 cm box  -> zone_B (cyan)
+  2: heavy     # 52 cm box  -> zone_C (purple)

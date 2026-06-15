@@ -103,46 +103,37 @@ def goal_position(env: ManagerBasedRLEnv) -> torch.Tensor:
     return torch.zeros(env.num_envs, 3, device=env.device)
 
 
-def goal_id(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """One-hot (num_envs, 3) commanded category [fragile, regular, heavy]. Reads env.goal_id_buf."""
-    if hasattr(env, "goal_id_buf"):
-        return env.goal_id_buf
-    return torch.zeros(env.num_envs, 3, device=env.device)
+def goal_embedding(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Return CLIP text embedding (num_envs, 512) for each env's current goal zone.
 
+    Wired by Person 4. Falls back to zeros — preserving the original contract — when
+    CLIP (open-clip-torch) is not installed or the goal/zone buffers aren't ready,
+    so the env never crashes on a clean install. The 3 instruction embeddings are
+    computed once and cached on the env (`_clip_encoder`); per step this is just an
+    index gather, no CLIP forward pass.
+    """
+    zeros = torch.zeros(env.num_envs, GOAL_EMB_DIM, device=env.device)
+    goal_pos = getattr(env, "goal_pos", None)
+    zone_pos = getattr(env, "_zone_pos", None)
+    if goal_pos is None or zone_pos is None:
+        return zeros
 
-def ee_position(
-    env: ManagerBasedRLEnv,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """End-effector (panda_hand) xyz in the base frame, shape (num_envs, 3)."""
-    robot: Articulation = env.scene[asset_cfg.name]
-    ee = robot.body_names.index("panda_hand")
-    base = robot.body_names.index("base_link")
-    return robot.data.body_pos_w[:, ee] - robot.data.body_pos_w[:, base]
+    enc = getattr(env, "_clip_encoder", None)
+    if enc is None:
+        try:
+            from perception.language.clip_encoder import CLIPInstructionEncoder
 
+            enc = CLIPInstructionEncoder(device=str(env.device))
+        except Exception:
+            enc = False  # mark "tried, unavailable" so we don't retry every step
+        env._clip_encoder = enc
+    if not enc or not getattr(enc, "available", False):
+        return zeros
 
-def gripper_state(
-    env: ManagerBasedRLEnv,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Normalized finger opening (num_envs, 1) in [0,1] (0=closed, 1=open at 0.035 m)."""
-    robot: Articulation = env.scene[asset_cfg.name]
-    j = robot.joint_names.index("panda_finger_joint1")
-    return (robot.data.joint_pos[:, j:j + 1] / 0.035).clamp(0.0, 1.0)
+    from perception.language.clip_encoder import zone_index_from_goal_pos
 
-
-def holding_state(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """(num_envs, 1) float: 1.0 if the target box is currently grasped. Reads env.holding."""
-    if hasattr(env, "holding"):
-        return env.holding.float().unsqueeze(-1)
-    return torch.zeros(env.num_envs, 1, device=env.device)
-
-
-def box_position(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """Target box xyz, env-local (num_envs, 3). Reads env.box_pos (commanded by goal_id)."""
-    if hasattr(env, "box_pos"):
-        return env.box_pos
-    return torch.zeros(env.num_envs, 3, device=env.device)
+    idx = zone_index_from_goal_pos(goal_pos, zone_pos)
+    return enc.embed_zone_indices(idx).to(env.device)
 
 
 def robot_heading(

@@ -27,6 +27,10 @@ wandb/
 *.pth
 checkpoints/
 replay_buffer/
+training/results/
+# Rendered YOLO dataset (regenerate via perception/detection/render_dataset.py)
+perception/detection/dataset/
+perception/detection/runs/
 
 # ── OS ────────────────────────────────────────────────────────────────
 .DS_Store

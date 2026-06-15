@@ -1,0 +1,17 @@
+# training/configs/sac_baseline.yaml — experiment C4 (model-free baseline, RQ1).
+experiment: sac_baseline
+algo: sac
+seeds: [0, 1]
+timesteps: 200000
+env:
+  num_envs: 1
+sac:
+  learning_rate: 3.0e-4
+  buffer_size: 200000
+  learning_starts: 5000
+  batch_size: 256
+  gamma: 0.99
+  tau: 0.005
+logging:
+  wandb_project: bantai-warehouse
+  logdir: training/results/sac_baseline

@@ -1,0 +1,33 @@
+# requirements-ml.txt — ML stack (P2–P5). Install INTO the `isaaclab` conda env,
+# but guard the pinned torch: Isaac Sim needs torch==2.7.0+cu128. If any package
+# below tries to pull a different torch, install it with `--no-deps` or use a
+# separate env. Verify after install:
+#   python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+#   -> must still be 2.7.0+cu128 True
+#
+#   pip install -r requirements-ml.txt
+#
+# DO NOT add `torch` / `torchvision` here — they are pinned by docs/INSTALL.md.
+
+# ── Baselines (P5): SAC / PPO ─────────────────────────────────────────
+stable-baselines3>=2.3.0       # MultiInputPolicy for Dict (image+vector) obs
+tensorboard>=2.17.0
+
+# ── Experiment tracking (P5) ──────────────────────────────────────────
+wandb>=0.17.0
+pyyaml>=6.0
+
+# ── DreamerV3 (P2): vendored NM512 deps (models/dreamerv3/vendor) ──────
+# NOTE: NM512 pins gym==0.22 (OLD gym, separate from gymnasium used by env/).
+gym==0.22.0
+ruamel.yaml>=0.17.4
+einops>=0.3.0
+moviepy>=1.0.3
+
+# ── CLIP language encoder (P4) ────────────────────────────────────────
+open-clip-torch>=2.24.0        # frozen ViT-B/32 text encoder
+
+# ── YOLOv8 detection (P3) ─────────────────────────────────────────────
+ultralytics>=8.2.0
+opencv-python>=4.7.0
+imageio>=2.31.0
