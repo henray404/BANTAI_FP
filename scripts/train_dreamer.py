@@ -10,7 +10,7 @@
 #
 # UNVERIFIED on this hardware: env needs `pixels`; Blackwell camera SDP blocker has
 # kept the full env from running end-to-end on the RTX 5050
-# (docs/project_overview.md). Run on a working sim.
+# (docs/project/project_overview.md). Run on a working sim.
 #
 # Deps: vendored NM512 (models/dreamerv3/vendor) + its requirements (gym==0.22,
 # ruamel.yaml, einops, ...). See requirements-ml.txt. Do NOT let these downgrade the

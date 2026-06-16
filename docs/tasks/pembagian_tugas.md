@@ -2,7 +2,7 @@
 
 > Visual Goal-Conditioned World Model untuk Warehouse Pickup · Tim 5 orang · pure DL
 > Turunan konkret dari: `docs/superpowers/specs/2026-06-08-pure-dl-pickup-redesign.md` (source of truth),
-> `docs/superpowers/plans/2026-06-08-env-pickup-migration.md` (plan P1), `docs/project_overview.md`, `docs/timeline_terbaru.md`.
+> `docs/superpowers/plans/2026-06-08-env-pickup-migration.md` (plan P1), `docs/project/project_overview.md`, `docs/project/timeline_terbaru.md`.
 > Dokumen ini menjawab "siapa ngerjain apa, file mana, kapan kelar" — bukan ringkasan visi.
 
 ## Cara baca dokumen ini
@@ -35,7 +35,7 @@ buffer.her_relabel(trajectory)     # Visual HER (P3)
 buffer.sample(batch_size) -> batch_dict
 ```
 
-Status repo per 2026-06-08: **hanya kode P1 (environment) yang ada**. Stack ML (P2–P5) belum ada satu pun di repo. Lihat `docs/project_overview.md` §"Status Implementasi".
+Status repo per 2026-06-08: **hanya kode P1 (environment) yang ada**. Stack ML (P2–P5) belum ada satu pun di repo. Lihat `docs/project/project_overview.md` §"Status Implementasi".
 
 ---
 
@@ -71,7 +71,7 @@ Status repo per 2026-06-08: **hanya kode P1 (environment) yang ada**. Stack ML (
 - ⬜ regression test: chassis (`body_pos_w[base_link]`) translasi >0.1m di forward command + assert `is_fixed_base=True` (shape-only test sebelumnya nutupin bug ini)
 - ⬜ re-verify `_base_cmd` yaw projection masih benar setelah base beneran gerak
 - ⬜ run end-to-end: `run_env.py` windowed 1000 step, verify holding flip 0→1 saat grasp, reward Phase A→B switch, no crash
-- ⬜ ukur VRAM nyata (18 box + arm IK aktif) — lihat `docs/research_isaaclab_cloud_lowvram.md`
+- ⬜ ukur VRAM nyata (18 box + arm IK aktif) — lihat `docs/research/research_isaaclab_cloud_lowvram.md`
 
 **Interface yang P1 JAMIN:** `obs` dict v2 + `action (6,)` di atas. Referensi Isaac: `Isaac-Lift-Cube-Franka-v0` (IK action term + lift reward), `Isaac-Reach-Franka-v0`.
 
@@ -204,7 +204,7 @@ P5 (baseline) ─ butuh env saja ─────► bisa mulai sebelum DreamerV3
 
 ## Catatan
 - Interface contract (`obs`/`action`/`buffer`) tidak boleh diubah sepihak — diskusi tim dulu.
-- Status nyata: repo = 100% kode P1; P2–P5 stack ML belum ada (per 2026-06-08). Lihat `docs/timeline_terbaru.md` untuk jadwal risk-adjusted.
+- Status nyata: repo = 100% kode P1; P2–P5 stack ML belum ada (per 2026-06-08). Lihat `docs/project/timeline_terbaru.md` untuk jadwal risk-adjusted.
 - CLIP + YOLO DIHAPUS dari scope 2026-06-08 (bukan "belum dibangun"). Kategori via `goal_id`, no detection, no text.
 
 ---

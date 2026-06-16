@@ -7,7 +7,7 @@
 #
 #   pip install -r requirements-ml.txt
 #
-# DO NOT add `torch` / `torchvision` here — they are pinned by docs/INSTALL.md.
+# DO NOT add `torch` / `torchvision` here — they are pinned by docs/setup/INSTALL.md.
 
 # ── Baselines (P5): SAC / PPO ─────────────────────────────────────────
 stable-baselines3>=2.3.0       # MultiInputPolicy for Dict (image+vector) obs

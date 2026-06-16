@@ -25,4 +25,4 @@ New title: **"Visual Goal-Conditioned World Model for Warehouse Pickup"**.
 - P3 (was YOLO) → Policy + Visual HER. P4 (was CLIP) → Manipulation.
 - Research novelty retained without perception: **CA-SLOPE** reads category from `goal_id`, not a detector (see ADR-0003 / spec §4b).
 - Lower VRAM and integration surface; perception of category is explicitly **out of scope** for v1.
-- Supersedes category/text framing in `CLAUDE.md`, `docs/project_overview.md`, `docs/environment.md`, `docs/timeline_terbaru.md`.
+- Supersedes category/text framing in `CLAUDE.md`, `docs/project/project_overview.md`, `docs/specs/environment.md`, `docs/project/timeline_terbaru.md`.

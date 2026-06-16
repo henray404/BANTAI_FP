@@ -391,7 +391,7 @@ pytest tests/test_layout_grid.py -v
 | Items rigid (graspable) | Pickup task (2026-06-08); boxes must be grasped — physics ON |
 | scale=(0.01,...) on USDs | Measured: Isaac Lab UsdFileCfg has no auto metersPerUnit conversion |
 
-Full paper list: `docs/referensi.md`
+Full paper list: `docs/research/referensi.md`
 
 ---
 

@@ -3,7 +3,7 @@
 > Disusun ulang dari **kondisi nyata workspace**, bukan dari rencana awal.
 > Tanggal acuan: **2026-06-08** (Senin).
 > Sumber: audit kode `env/`, `scripts/`, `tests/`, `docs/`, git log, dan bug logs.
-> Pendamping: lihat `docs/project_overview.md` (sudah diupdate) untuk status per komponen.
+> Pendamping: lihat `docs/project/project_overview.md` (sudah diupdate) untuk status per komponen.
 
 ---
 
@@ -23,7 +23,7 @@
 > ## 📌 UPDATE 2026-06-08 — STATUS RINGKAS
 > **Env P1 = SELESAI & terverifikasi.** Camera blocker (06-03) + root-state frozen bug (06-04)
 > sudah tuntas. `test_env.py --num_envs 1` (camera ON) = ALL PASS 16/16.
-> **Utang dokumentasi §6 SUDAH LUNAS:** `CLAUDE.md`, `configs/env_config.yaml`, `docs/CHANGES.md`
+> **Utang dokumentasi §6 SUDAH LUNAS:** `CLAUDE.md`, `configs/env_config.yaml`, `docs/project/CHANGES.md`
 > kini semua konsisten Ridgeback-Franka + 54 rigid box (bukan Carter lagi). Tabel §6 & checklist #5
 > di bawah ditandai DONE.
 > **Yang masih kosong = SELURUH stack ML (P2–P5).** Folder `models/dreamerv3`, `perception/detection`,
@@ -41,7 +41,7 @@
 > **591.84 → 580.88** + fix 2 bug kode (contact-filter, reward shape), `test_env.py --num_envs 1`
 > camera ON = **ALL PASS (10/10)** — pertama kali env jalan end-to-end dengan camera.
 > Critical-path `[BLOCKER]` di §2 **kelar**. Sekarang lanjut ke `[VERIFY]` first-run checks lalu `[ML]`.
-> Detail: `bugs_errors/2026-05-22_sdp-camera-crash-blackwell.md` (Resolution), `docs/CHANGES.md`.
+> Detail: `bugs_errors/2026-05-22_sdp-camera-crash-blackwell.md` (Resolution), `docs/project/CHANGES.md`.
 > ⚠️ **Pin driver di 580.88** — jangan auto-update ke 591.x/595.x (crash balik).
 
 ---
@@ -201,9 +201,9 @@ Geser semua +1 minggu. **Descope:** pickup turun ke **Curr 1 saja** (carry/place
 |---|---|---|
 | `CLAUDE.md` | Tulis robot = Carter v1 diff-drive, misi = "nav-only Phase 1" | ✅ **DONE** — sudah Ridgeback-Franka + obs contract (incl. `heading`) + spec pickup |
 | `configs/env_config.yaml` | `robot.type: carter_v1`, `items.count: 18 static_usd`, props forklift/palletasm | ✅ **DONE** — `type: ridgeback_franka`, `items.count: 54`, props sesuai kode |
-| `docs/CHANGES.md` | Mendokumentasikan switch ke **Carter v2.4** saja | ✅ **DONE** — entri "Carter v2.4 → Ridgeback-Franka" + box-physics + camera-resolved + root-state-fix |
-| `docs/project_overview.md` | Item color-coded, tidak sebut arm, task 3-stage seolah sudah ada, blocker camera OPEN | ✅ **DONE** — section "Status Implementasi" diperbarui 2026-06-08 |
-| `docs/environment.md` | §3 Robot masih Jetbot + wheel kinematics (WHEEL_BASE 0.118) | ✅ **DONE** (2026-06-08) — diganti Ridgeback-Franka `_base_cmd` |
+| `docs/project/CHANGES.md` | Mendokumentasikan switch ke **Carter v2.4** saja | ✅ **DONE** — entri "Carter v2.4 → Ridgeback-Franka" + box-physics + camera-resolved + root-state-fix |
+| `docs/project/project_overview.md` | Item color-coded, tidak sebut arm, task 3-stage seolah sudah ada, blocker camera OPEN | ✅ **DONE** — section "Status Implementasi" diperbarui 2026-06-08 |
+| `docs/specs/environment.md` | §3 Robot masih Jetbot + wheel kinematics (WHEEL_BASE 0.118) | ✅ **DONE** (2026-06-08) — diganti Ridgeback-Franka `_base_cmd` |
 
 > **Catatan working tree:** `env/warehouse_scene.py` (uncommitted) menambah kembali `visual_material` warna per-box (54 PreviewSurfaceCfg). Ini **bisa memicu lagi SDP crash** (komentar lama bilang 54 material node = trigger Blackwell crash). Verifikasi saat camera fix; kalau crash balik, revert ke versi tanpa per-box material.
 

@@ -306,7 +306,7 @@ Notes:
 | `configs/env_config.yaml` | new params: station coords, radii, `K_reach`, attach tol, IK (method/damping), solver iters, all reward weights |
 | `tests/test_pickup_manager.py` | **new** — pure-python state-machine transition tests (no Isaac Sim) |
 | `tests/test_env.py` | update obs contract assertions (+`carrying`) |
-| `docs/environment.md` | document pickup task + new obs key |
+| `docs/specs/environment.md` | document pickup task + new obs key |
 | `CLAUDE.md` | update mission + obs contract + reward |
 
 ## 10. Testing Strategy

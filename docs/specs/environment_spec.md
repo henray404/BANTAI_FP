@@ -2,7 +2,7 @@
 
 > Canonical numeric source: `configs/env_config.yaml`. Scene built in `env/warehouse_scene.py`;
 > RL env (obs/action/reward/termination + Gym wrapper) in `env/warehouse_env.py`.
-> Broader teammate design doc: `docs/environment.md`. This file is the focused parameter spec.
+> Broader teammate design doc: `docs/specs/environment.md`. This file is the focused parameter spec.
 
 ## Simulation / episode
 | Param | Value |

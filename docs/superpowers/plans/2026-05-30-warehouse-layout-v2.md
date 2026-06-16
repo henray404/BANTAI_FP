@@ -542,7 +542,7 @@ Expected: PASS (4 tests).
 git add -A
 git commit -m "chore: tune ISLAND_RACK_DX / RACK_SHELF_Z after visual verification"
 ```
-Then update `docs/environment.md` layout section to match v2 (room 20x30, 9 islands, props, num_envs 2, episode 60s).
+Then update `docs/specs/environment.md` layout section to match v2 (room 20x30, 9 islands, props, num_envs 2, episode 60s).
 
 ---
 

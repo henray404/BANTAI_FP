@@ -17,7 +17,7 @@ menggantikan placeholder zeros. Lalu implementasi **Visual HER** (novelty contri
 - [ ] Implement `goal_embedding()` dengan CLIP frozen ViT-B/32
 - [ ] Replace placeholder zeros di `env/warehouse_env.py` → fungsi `goal_embedding()` (line 89–91)
 - [ ] Text instructions per zone (lihat mapping di bawah)
-- [ ] Projection layer: 512-dim → 64-dim (referensi: LED-WM Section 3, lihat `docs/referensi.md`)
+- [ ] Projection layer: 512-dim → 64-dim (referensi: LED-WM Section 3, lihat `docs/research/referensi.md`)
 - [ ] Rancang relabel logic untuk Visual HER
 
 ## Tugas Minggu 5 (11–17 Juni) — Integration
@@ -64,7 +64,7 @@ Zone ↔ category mapping: `env/warehouse_scene.py` → `ZONE_ITEM_MAP`
 
 CLIP output = 512-dim. Terlalu besar untuk langsung masuk RSSM head.
 Project ke **64-dim** sebelum feed ke policy head.
-Referensi: LED-WM (2025) Section 3. Lihat `docs/referensi.md`.
+Referensi: LED-WM (2025) Section 3. Lihat `docs/research/referensi.md`.
 
 ---
 

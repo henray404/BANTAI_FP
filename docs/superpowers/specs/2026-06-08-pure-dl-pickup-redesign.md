@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-08
 **Status:** Approved (brainstorm), pending implementation plan
-**Supersedes:** text-conditioned / category-aware framing in `CLAUDE.md`, `docs/project_overview.md`, `docs/environment.md`, `docs/timeline_terbaru.md`
+**Supersedes:** text-conditioned / category-aware framing in `CLAUDE.md`, `docs/project/project_overview.md`, `docs/specs/environment.md`, `docs/project/timeline_terbaru.md`
 **Related:** `docs/superpowers/specs/2026-06-01-arm-pickup-design.md` (earlier arm spec — this revises it without YOLO/CLIP)
 
 ---

@@ -302,8 +302,8 @@ The arm is present but only holds its tucked pose. No `pickup_manager.py`, no sc
 - 🔴 **Camera SDP crash (RTX 5050 Blackwell) still OPEN.** RL env (`run_env.py`/`test_env.py`)
   never passed end-to-end with camera on — TiledCamera does NOT bypass SDP on Isaac 5.1.
   Only camera-strip scripts run. Tracked in `bugs_errors/2026-05-22_sdp-camera-crash-blackwell.md`.
-  This is the #1 critical-path item — see `docs/timeline_terbaru.md`.
-- Docs synced to code reality: `CLAUDE.md`, `configs/env_config.yaml`, `docs/project_overview.md`
+  This is the #1 critical-path item — see `docs/project/timeline_terbaru.md`.
+- Docs synced to code reality: `CLAUDE.md`, `configs/env_config.yaml`, `docs/project/project_overview.md`
   updated (were describing Carter + 18 boxes + color-coded items + 3-stage curriculum that no
   longer match the code).
 - ⚠️ Working-tree note: `warehouse_scene.py` re-adds per-box `visual_material` (54 PreviewSurfaceCfg).

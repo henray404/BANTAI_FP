@@ -264,6 +264,6 @@ If these run without crashing and you see the warehouse, **setup is complete.**
 
 - Isaac Lab pip install (official): https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/pip_installation.html
 - Project context & file map: `CLAUDE.md`
-- Environment design doc: `docs/environment.md`
+- Environment design doc: `docs/specs/environment.md`
 - Known bugs: `bugs_errors/`
 - Config reference: `configs/env_config.yaml`

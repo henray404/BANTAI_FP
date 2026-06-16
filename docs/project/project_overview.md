@@ -9,7 +9,7 @@
 
 > ⚠️ **Dokumen ini punya 2 lapis:** bagian **"Status Implementasi"** di bawah = kondisi NYATA
 > per 2026-06-08 (hasil audit kode). Sisanya = desain/visi (sebagian belum dibangun).
-> Untuk jadwal realistis lihat **`docs/timeline_terbaru.md`**.
+> Untuk jadwal realistis lihat **`docs/project/timeline_terbaru.md`**.
 
 ---
 
@@ -26,7 +26,7 @@ Ringkasan jujur kondisi workspace. Baca ini sebelum percaya bagian visi di bawah
 - Goal resampling per-env + randomisasi posisi box tiap reset. TiledCamera 64×64, contact sensor.
 - Script: `run_env.py`, `drive_robot.py` (teleop, camera-strip), `smoke_test.py` (auto base test). Test: `test_env.py`, `test_layout_grid.py`, `test_obs.py`. `layout_grid.py` (math murni).
 
-> ℹ️ Kode P1 di atas dibangun untuk task **nav single-goal lama**. Redesign 2026-06-08 (pickup) = migrasi env belum dikerjakan — lihat "Pickup migration" di `docs/environment.md` §12.
+> ℹ️ Kode P1 di atas dibangun untuk task **nav single-goal lama**. Redesign 2026-06-08 (pickup) = migrasi env belum dikerjakan — lihat "Pickup migration" di `docs/specs/environment.md` §12.
 
 ### ✅ Blocker TUNTAS (dulu 🔴, sekarang clear)
 - **Camera SDP crash di RTX 5050 (Blackwell) RESOLVED** (2026-06-03) lewat downgrade driver NVIDIA 591.84 → 580.88 (DDU clean install) + 2 fix kode (contact-filter dihapus, `collision_penalty` shape). `test_env.py --num_envs 1` camera ON = **ALL PASS**. ⚠️ Pin driver di 580.88, jangan auto-update ke 591.x/595.x. Lihat `bugs_errors/2026-05-22_sdp-camera-crash-blackwell.md`.
@@ -46,10 +46,10 @@ Ringkasan jujur kondisi workspace. Baca ini sebelum percaya bagian visi di bawah
 
 ### 📝 Status dokumentasi (per 2026-06-08, redesign pickup)
 - `CLAUDE.md` → diupdate ke **pickup**: obs `goal_id`+manip keys, action `(6,)`, reward staged, roles baru, CA-SLOPE/HER.
-- `docs/environment.md` → diupdate ke pickup: task, obs, action, reward, items rigid graspable, arm aktif, "Pickup migration" checklist §12.
+- `docs/specs/environment.md` → diupdate ke pickup: task, obs, action, reward, items rigid graspable, arm aktif, "Pickup migration" checklist §12.
 - `docs/superpowers/specs/2026-06-08-pure-dl-pickup-redesign.md` → spec baru (source of truth).
 - ⚠️ **`configs/env_config.yaml`** → masih state lama (`items.count: 54`, action 2-dim, nav reward). Belum diupdate ke pickup — perlu disinkronkan saat migrasi env.
-- `docs/CHANGES.md` → changelog historis (entri Carter/box-physics/camera tetap; entri redesign pickup belum ditambah).
+- `docs/project/CHANGES.md` → changelog historis (entri Carter/box-physics/camera tetap; entri redesign pickup belum ditambah).
 
 ---
 
@@ -234,7 +234,7 @@ Metrik evaluasi: task success rate, sample efficiency (reward vs environment ste
 
 > ⚠️ **Tabel di bawah = rencana AWAL dan sudah TIDAK realistis** (per 2026-06-03 baru akhir
 > Minggu 3, env belum bisa run end-to-end, stack ML belum ada). Jadwal yang dipakai sekarang:
-> **`docs/timeline_terbaru.md`** — disusun ulang dari kondisi nyata + skenario risk-adjusted.
+> **`docs/project/timeline_terbaru.md`** — disusun ulang dari kondisi nyata + skenario risk-adjusted.
 
 | Minggu | Fokus | Target (rencana awal) | Realita |
 |---|---|---|---|

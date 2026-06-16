@@ -7,7 +7,7 @@
 # every box's 3D pose+size is projected into the camera to a 2D bbox).
 #
 # UNVERIFIED on this hardware: the full env (needs `pixels`) has not run end-to-end
-# on the RTX 5050 (Blackwell camera SDP blocker — docs/project_overview.md). Run on
+# on the RTX 5050 (Blackwell camera SDP blocker — docs/project/project_overview.md). Run on
 # a working sim. Also VERIFY the camera convention/intrinsics math below on the first
 # rendered frame (overlay the boxes) before trusting labels.
 #

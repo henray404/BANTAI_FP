@@ -10,7 +10,7 @@
 # passes a built WarehouseGymEnv (num_envs=1) into the factory.
 #
 # UNVERIFIED: full env needs `pixels` → blocked by the Blackwell camera SDP issue on
-# the reference RTX 5050 (docs/project_overview.md). Run on a working sim.
+# the reference RTX 5050 (docs/project/project_overview.md). Run on a working sim.
 
 """NM512 dreamerv3-torch suite env wrapping WarehouseGymEnv (num_envs=1)."""
 

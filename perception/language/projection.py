@@ -2,7 +2,7 @@
 # Person 4 — 512 → 64 projection for the goal embedding.
 #
 # CLIP output is 512-d; feeding that raw into the RSSM goal head is heavy. Project
-# to 64-d (ref: LED-WM 2025 Sec.3, docs/referensi.md). This is a LEARNED layer that
+# to 64-d (ref: LED-WM 2025 Sec.3, docs/research/referensi.md). This is a LEARNED layer that
 # lives on the POLICY side (P2's RSSM), NOT in the env — the obs contract keeps
 # goal_emb at 512 so the interface is unchanged. P2 instantiates this in the encoder.
 

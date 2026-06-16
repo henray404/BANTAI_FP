@@ -15,7 +15,7 @@
 #   The underlying Isaac ManagerBasedRLEnv auto-resets a done sub-env on the next
 #   step internally. gymnasium/SB3 expect the terminal obs on `done`, then a manual
 #   reset(). For num_envs=1 single-episode rollouts this is usually fine, but verify
-#   the boundary obs once the sim runs. See bugs_errors/ + docs/project_overview.md.
+#   the boundary obs once the sim runs. See bugs_errors/ + docs/project/project_overview.md.
 
 """Single-env gymnasium adapter exposing WarehouseGymEnv to stable-baselines3."""
 
