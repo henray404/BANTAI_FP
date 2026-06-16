@@ -48,6 +48,16 @@ desktop.ini
 # ── Jupyter ───────────────────────────────────────────────────────────
 .ipynb_checkpoints/
 
+# ── Local debug / diagnostic artifacts (machine-specific, regenerate) ─
+# teleop diagnostic CSVs (scripts/drive_env.py --log)
+_debug/
+# onboard-camera debug frames (drive_env.py --cam)
+_cam_debug/
+# generated knowledge-graph output (/graphify)
+graphify-out/
+# team-forge agent scaffolding (planning docs, not code)
+.team/
+
 
 CLAUDE.md
 

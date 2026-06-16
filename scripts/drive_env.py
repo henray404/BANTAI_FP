@@ -25,7 +25,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import math
 import sys
+import time
 from pathlib import Path
 
 from isaaclab.app import AppLauncher
@@ -40,12 +43,31 @@ parser.add_argument("--ee_sens", type=float, default=0.05,
 parser.add_argument("--cam", type=int, default=0,
                     help="Save the onboard camera frame to _cam_debug/ every N control steps "
                          "(0 = off). Use to SEE what the robot's camera captures.")
+parser.add_argument("--chase", type=int, default=1,
+                    help="3rd-person chase camera that follows the robot like a game (1=on, 0=off). "
+                         "Moves the VIEWPORT camera only — does NOT touch the onboard 'pixels' obs.")
+parser.add_argument("--chase_back", type=float, default=6.0,
+                    help="Chase camera distance behind the robot (metres).")
+parser.add_argument("--chase_height", type=float, default=4.0,
+                    help="Chase camera height above the robot (metres).")
+parser.add_argument("--log", type=str, default="",
+                    help="Write a per-step diagnostic CSV to this path (relative to project root). "
+                         "Empty = off. Captures action, ee_pos, base roll/pitch/yaw, gripper, holding.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True  # warehouse env always builds the onboard camera
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
+
+# Disable the PhysX Support UI extension: its selection manipulator throws
+# "Accessed invalid null prim" every frame when env resets re-write box/robot
+# prims, spamming tracebacks to the console and stuttering the render loop.
+# It is a GUI convenience only — the env does not need it.
+import omni.kit.app  # noqa: E402
+omni.kit.app.get_app().get_extension_manager().set_extension_enabled_immediate(
+    "omni.physx.supportui", False
+)
 
 # ── Imports (after AppLauncher) ───────────────────────────────────────
 import numpy as np  # noqa: E402
@@ -86,6 +108,30 @@ def _build_action(base_cmd: torch.Tensor, arm_cmd: torch.Tensor, num_envs: int) 
     return action
 
 
+def _base_euler_deg(env) -> tuple[float, float, float]:
+    """Return base_link (roll, pitch, yaw) in degrees from its world quaternion (moving chassis)."""
+    q = env._env.scene["robot"].data.body_quat_w[0, env._base_link_idx]  # (w, x, y, z)
+    w, x, y, z = (float(v) for v in q)
+    roll = math.degrees(math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y)))
+    pitch = math.degrees(math.asin(max(-1.0, min(1.0, 2.0 * (w * y - z * x)))))
+    yaw = math.degrees(math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
+    return roll, pitch, yaw
+
+
+def _chase_cam(env, obs: dict, back: float, height: float) -> None:
+    """Point the viewport camera behind+above the robot, looking at it (3rd-person follow).
+
+    Reads the MOVING base_link world pose (NOT root_pos_w — fixed-root robot, IsaacLab #1268)
+    and the heading to place the camera behind the robot's facing direction.
+    """
+    base_w = env._env.scene["robot"].data.body_pos_w[0, env._base_link_idx]  # world xyz (moving)
+    bx, by, bz = float(base_w[0]), float(base_w[1]), float(base_w[2])
+    cos_y, sin_y = float(obs["heading"][0][0]), float(obs["heading"][0][1])  # [cos(yaw), sin(yaw)]
+    eye = (bx - back * cos_y, by - back * sin_y, bz + height)
+    target = (bx + cos_y, by + sin_y, bz + 0.5)
+    env._env.sim.set_camera_view(eye=eye, target=target)
+
+
 def main() -> None:
     """Build the env, then loop: keyboard -> (6,) action -> env.step; print EE / grasp state."""
     cfg = WarehouseEnvCfg()
@@ -111,6 +157,19 @@ def main() -> None:
         cam_dir.mkdir(exist_ok=True)
         print(f"[drive_env] saving onboard camera every {args_cli.cam} steps -> {cam_dir}")
 
+    log_f = None
+    log_w = None
+    if args_cli.log:
+        log_path = PROJECT_ROOT / args_cli.log
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_f = open(log_path, "w", newline="")
+        log_w = csv.writer(log_f)
+        log_w.writerow(["t", "step", "a_base_lin", "a_base_ang", "a_ee_dx", "a_ee_dy", "a_ee_dz",
+                        "a_grip", "ee_x", "ee_y", "ee_z", "base_roll_deg", "base_pitch_deg",
+                        "base_yaw_deg", "base_wx", "base_wy", "gripper", "holding"])
+        print(f"[drive_env] logging per-step diagnostic CSV -> {log_path}")
+
+    t0 = time.time()
     step = 0
     while simulation_app.is_running():
         action = _build_action(base_kb.advance(), arm_kb.advance(), env.num_envs)
@@ -118,8 +177,25 @@ def main() -> None:
         if bool(terminated[0]) or bool(truncated[0]):
             obs, _ = env.reset()
 
+        if args_cli.chase > 0:
+            _chase_cam(env, obs, args_cli.chase_back, args_cli.chase_height)
+
         if args_cli.cam > 0 and step % args_cli.cam == 0:
             _save_frame(env.render(), cam_dir / f"cam_{step:05d}.png")
+
+        if log_w is not None:
+            roll, pitch, yaw = _base_euler_deg(env)
+            base_w = env._env.scene["robot"].data.body_pos_w[0, env._base_link_idx]  # world xyz
+            ee = obs["ee_pos"][0].tolist()
+            a = [float(v) for v in action[0].tolist()]
+            log_w.writerow([round(time.time() - t0, 3), step,
+                            *[round(v, 4) for v in a],
+                            round(ee[0], 4), round(ee[1], 4), round(ee[2], 4),
+                            round(roll, 2), round(pitch, 2), round(yaw, 2),
+                            round(float(base_w[0]), 4), round(float(base_w[1]), 4),
+                            round(float(obs["gripper"][0]), 3), int(obs["holding"][0])])
+            if step % 10 == 0:
+                log_f.flush()
 
         if step % 10 == 0:  # env runs at 10Hz control -> ~1 Hz print
             ee = [round(v, 3) for v in obs["ee_pos"][0].tolist()]
@@ -130,6 +206,9 @@ def main() -> None:
             if any(abs(v) > 1e-6 for v in act) or hold:
                 print(f"[drive_env] action={act}  ee_pos={ee} gripper={grip} holding={hold} box={box}")
         step += 1
+
+    if log_f is not None:
+        log_f.close()
 
 
 if __name__ == "__main__":

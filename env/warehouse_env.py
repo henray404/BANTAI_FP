@@ -103,37 +103,46 @@ def goal_position(env: ManagerBasedRLEnv) -> torch.Tensor:
     return torch.zeros(env.num_envs, 3, device=env.device)
 
 
-def goal_embedding(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """Return CLIP text embedding (num_envs, 512) for each env's current goal zone.
+def goal_id(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """One-hot (num_envs, 3) commanded category [fragile, regular, heavy]. Reads env.goal_id_buf."""
+    if hasattr(env, "goal_id_buf"):
+        return env.goal_id_buf
+    return torch.zeros(env.num_envs, 3, device=env.device)
 
-    Wired by Person 4. Falls back to zeros — preserving the original contract — when
-    CLIP (open-clip-torch) is not installed or the goal/zone buffers aren't ready,
-    so the env never crashes on a clean install. The 3 instruction embeddings are
-    computed once and cached on the env (`_clip_encoder`); per step this is just an
-    index gather, no CLIP forward pass.
-    """
-    zeros = torch.zeros(env.num_envs, GOAL_EMB_DIM, device=env.device)
-    goal_pos = getattr(env, "goal_pos", None)
-    zone_pos = getattr(env, "_zone_pos", None)
-    if goal_pos is None or zone_pos is None:
-        return zeros
 
-    enc = getattr(env, "_clip_encoder", None)
-    if enc is None:
-        try:
-            from perception.language.clip_encoder import CLIPInstructionEncoder
+def ee_position(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """End-effector (panda_hand) xyz in the base frame, shape (num_envs, 3)."""
+    robot: Articulation = env.scene[asset_cfg.name]
+    ee = robot.body_names.index("panda_hand")
+    base = robot.body_names.index("base_link")
+    return robot.data.body_pos_w[:, ee] - robot.data.body_pos_w[:, base]
 
-            enc = CLIPInstructionEncoder(device=str(env.device))
-        except Exception:
-            enc = False  # mark "tried, unavailable" so we don't retry every step
-        env._clip_encoder = enc
-    if not enc or not getattr(enc, "available", False):
-        return zeros
 
-    from perception.language.clip_encoder import zone_index_from_goal_pos
+def gripper_state(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Normalized finger opening (num_envs, 1) in [0,1] (0=closed, 1=open at 0.035 m)."""
+    robot: Articulation = env.scene[asset_cfg.name]
+    j = robot.joint_names.index("panda_finger_joint1")
+    return (robot.data.joint_pos[:, j:j + 1] / 0.035).clamp(0.0, 1.0)
 
-    idx = zone_index_from_goal_pos(goal_pos, zone_pos)
-    return enc.embed_zone_indices(idx).to(env.device)
+
+def holding_state(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """(num_envs, 1) float: 1.0 if the target box is currently grasped. Reads env.holding."""
+    if hasattr(env, "holding"):
+        return env.holding.float().unsqueeze(-1)
+    return torch.zeros(env.num_envs, 1, device=env.device)
+
+
+def box_position(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Target box xyz, env-local (num_envs, 3). Reads env.box_pos (commanded by goal_id)."""
+    if hasattr(env, "box_pos"):
+        return env.box_pos
+    return torch.zeros(env.num_envs, 3, device=env.device)
 
 
 def robot_heading(
@@ -333,6 +342,8 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         # env-local resting z per box (shelf surface + size/2) — lift is measured against this,
         # NOT absolute world z (a shelf box already sits ~0.8m up).
         self._box_rest_z = {n: pos[2] for (n, _s, _m, pos) in TARGET_BOX_SPECS}
+        # Box edge length per target — grasp uses distance to box SURFACE (size-aware), not center.
+        self._box_size = {n: s for (n, s, _m, _pos) in TARGET_BOX_SPECS}
         N, dev = self.num_envs, self.device
         self.goal_id_buf = torch.zeros(N, 3, device=dev)
         self.box_cat_idx = torch.zeros(N, dtype=torch.long, device=dev)
@@ -437,18 +448,14 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         ee_world = robot.data.body_pos_w[:, ee]
         j = robot.joint_names.index("panda_finger_joint1")
         closed = robot.data.joint_pos[:, j] < 0.0175   # < half of open (0.035)
-        # lift = how far the box has risen above its shelf resting height (env-local z compare).
-        cur_z = torch.stack([
-            self.scene[self.target_box_name[e]].data.root_pos_w[e, 2]
-            for e in range(self.num_envs)
-        ])
-        rest_z = torch.tensor(
-            [self._box_rest_z[self.target_box_name[e]] for e in range(self.num_envs)],
+        # Grasp on proximity to box SURFACE + gripper closed (boxes are larger than the gripper —
+        # no physical enclosure/lift required; carry is kinematic). box_half = box edge / 2.
+        box_half = torch.tensor(
+            [self._box_size[self.target_box_name[e]] * 0.5 for e in range(self.num_envs)],
             device=self.device,
-        ) + self.scene.env_origins[:, 2]
-        box_lift = cur_z - rest_z
-        newly = grasp_success(self.ee_pos, self.box_pos, closed, box_lift) & (~self.holding)
-        lost = grasp_lost(self.holding, self.ee_pos, self.box_pos) | (~closed & self.holding)
+        )
+        newly = grasp_success(self.ee_pos, self.box_pos, closed, box_half) & (~self.holding)
+        lost = grasp_lost(self.holding, self.ee_pos, self.box_pos, box_half) | (~closed & self.holding)
         self.grasp_event = newly
         self.drop_event = lost & (~self._box_in_any_zone())
         self.holding = (self.holding | newly) & (~lost)
@@ -495,6 +502,13 @@ class WarehouseGymEnv(gym.Env):
         # Moving-chassis body index, cached once. Fixed-root robot: root_pos_w never moves while
         # base_link does (IsaacLab #1268); _base_cmd reads base_link yaw for body-frame drive.
         self._base_link_idx: int = self._env.scene["robot"].body_names.index("base_link")
+        # Chassis yaw RELATIVE to the root/prismatic frame. The dummy prismatic joints translate in
+        # the articulation-root frame (root pose is yaw-randomized on reset), so drive must project
+        # by the revolute_z joint angle, NOT the absolute base_link world yaw — otherwise root_yaw
+        # is double-counted. See bugs_errors/2026-06-16_base-drive-doublecounts-spawn-yaw.md.
+        self._revolute_z_idx: int = self._env.scene["robot"].joint_names.index(
+            "dummy_base_revolute_z_joint"
+        )
 
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float32)
         self.observation_space = spaces.Dict(
@@ -512,12 +526,15 @@ class WarehouseGymEnv(gym.Env):
         )
 
     def _base_yaw(self) -> torch.Tensor:
-        """Current chassis yaw (rad) from the base_link quaternion, shape (num_envs,)."""
-        quat = self._env.scene["robot"].data.body_quat_w[:, self._base_link_idx]  # (w, x, y, z)
-        return torch.atan2(
-            2.0 * (quat[:, 0] * quat[:, 3] + quat[:, 1] * quat[:, 2]),
-            1.0 - 2.0 * (quat[:, 2] ** 2 + quat[:, 3] ** 2),
-        )
+        """Chassis yaw (rad) RELATIVE to the root/prismatic frame = revolute_z joint angle, (num_envs,).
+
+        The dummy prismatic joints translate in the articulation-root frame (root pose is
+        yaw-randomized on reset), so projecting the drive command by this joint angle yields
+        world motion = root_yaw + revolute_z = base_link world yaw (the facing direction). Using
+        the absolute base_link world yaw would double-count root_yaw — see
+        bugs_errors/2026-06-16_base-drive-doublecounts-spawn-yaw.md.
+        """
+        return self._env.scene["robot"].data.joint_pos[:, self._revolute_z_idx]
 
     def _base_cmd(self, action: torch.Tensor) -> torch.Tensor:
         """Map [linear, angular] in [-1,1] → holonomic base joint velocities [vx, vy, wz].

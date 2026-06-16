@@ -4,27 +4,34 @@ from __future__ import annotations
 
 import torch
 
-GRIP_RADIUS_M = 0.08  # EE must be within this of the box center to count as grasping
-LIFT_M = 0.05         # box must rise this far above its resting height to count as lifted
+GRIP_RADIUS_M = 0.10  # EE must be within this of the box SURFACE to count as a contact-grasp
 
 
 def grasp_success(
     ee_pos: torch.Tensor,
     box_pos: torch.Tensor,
     gripper_closed: torch.Tensor,
-    box_lift: torch.Tensor,
+    box_half: torch.Tensor,
 ) -> torch.Tensor:
-    """(N,) bool: gripper closed AND EE within GRIP_RADIUS_M of box AND box lifted > LIFT_M."""
-    near = torch.norm(ee_pos - box_pos, dim=-1) < GRIP_RADIUS_M
-    lifted = box_lift > LIFT_M
-    return near & gripper_closed & lifted
+    """(N,) bool: gripper closed AND EE within GRIP_RADIUS_M of the box SURFACE (size-aware).
+
+    Boxes (0.21/0.32/0.52 m) are larger than the Franka gripper opening, so we use a
+    proximity-to-surface contact model, not physical enclosure/lift. Once true, the env
+    kinematically carries the box (see WarehouseRLEnv._carry_held_boxes); lift is a consequence,
+    not a precondition. box_half = target box size / 2.
+    """
+    surface_dist = torch.norm(ee_pos - box_pos, dim=-1) - box_half
+    near = surface_dist < GRIP_RADIUS_M
+    return near & gripper_closed
 
 
 def grasp_lost(
     holding: torch.Tensor,
     ee_pos: torch.Tensor,
     box_pos: torch.Tensor,
+    box_half: torch.Tensor,
 ) -> torch.Tensor:
-    """(N,) bool: currently holding but the EE has separated from the box (> 2x GRIP_RADIUS_M)."""
-    separated = torch.norm(ee_pos - box_pos, dim=-1) > (2.0 * GRIP_RADIUS_M)
+    """(N,) bool: currently holding but the EE has separated from the box surface (> 2x radius)."""
+    surface_dist = torch.norm(ee_pos - box_pos, dim=-1) - box_half
+    separated = surface_dist > (2.0 * GRIP_RADIUS_M)
     return holding & separated

@@ -146,6 +146,11 @@ RIDGEBACK_FRANKA_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=f"{ISAAC_NUCLEUS_DIR}/Robots/Clearpath/RidgebackFranka/ridgeback_franka.usd",
         activate_contact_sensors=True,
+        # Disable gravity on the arm so the DifferentialIK (relative mode) holds its pose
+        # instead of sagging to a gravity-rest pose each step. Matches FRANKA_PANDA_HIGH_PD_CFG
+        # (Isaac-Lift-Cube/Reach-Franka). Boxes keep gravity, so a held box still has weight.
+        # See bugs_errors/2026-06-16_arm-sag-gravity-relative-ik.md.
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=True),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False,
             solver_position_iteration_count=12,
