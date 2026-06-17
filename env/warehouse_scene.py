@@ -239,6 +239,11 @@ RACK_SHELF_LEVELS = (0.72351, 1.32528, 1.92566)  # measured shelf surface z (bot
 # Shelf deck geometry — covers interior of rack frame without hitting uprights.
 # 0.70m × 0.70m square = orientation-agnostic (rack long axis unknown without USD inspection).
 SHELF_DECK_SIZE = (0.70, 0.70, 0.02)     # (width_x, depth_y, thickness_z) in meters
+# Deck colour — red to match the rack frame. Tune to the exact rack USD red if needed.
+# WARNING: visual materials on all 54 decks add material nodes; on Blackwell RTX 5050 this can
+# re-trigger the camera SDP crash (bugs_errors/2026-05-22_sdp-camera-crash-blackwell.md, "108
+# material nodes"). If the camera crashes, revert this or colour only the level-0 decks.
+RACK_RED = (0.55, 0.06, 0.06)
 
 RACK_SHELF_Z = RACK_SHELF_LEVELS[-1]     # top shelf z (kept for explore_scene hint)
 
@@ -312,8 +317,11 @@ def _shelf_deck_cfg(rack_idx: int, level_idx: int, rack_pos: tuple, shelf_z: flo
         spawn=sim_utils.CuboidCfg(
             size=SHELF_DECK_SIZE,
             collision_props=sim_utils.CollisionPropertiesCfg(),
-            # No visual_material: avoids SDP BindMaterialCommand that crashes Blackwell RTX 5050.
-            # See bugs_errors/2026-05-22_sdp-camera-crash-blackwell.md — 108 material nodes triggers it.
+            # Red deck to match the rack frame (user request 2026-06-17). NOTE: adds a material node
+            # per deck (54 total) — this is the SDP BindMaterialCommand that previously crashed the
+            # Blackwell RTX 5050 camera. See bugs_errors/2026-05-22_sdp-camera-crash-blackwell.md.
+            # If the camera crashes on run, revert this line.
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=RACK_RED),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(pos=pos),
     )
