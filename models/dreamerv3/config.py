@@ -41,24 +41,27 @@ def _coerce(v):
 
 
 # Warehouse-specific overrides on top of NM512 defaults.
-# - obs keys: image (cnn) + position|goal|goal_emb|heading (mlp).
+# - obs keys (pickup v2): image (cnn) + position|heading|goal|goal_id|ee_pos|
+#   gripper|holding|box_pos (mlp). regex anchored at start (re.match) — "goal" also
+#   matches "goal_id" but each key is tested once, so no double-encode.
 # - action_repeat=1: the env already decimates 200Hz→10Hz; don't double-repeat.
-# - time_limit=600: episode is 600 steps (60s @10Hz).
+# - time_limit=1000: pickup episode is 1000 steps (100s @10Hz).
 # - prefill/eval kept small so a first end-to-end run is cheap.
+_MLP_KEYS = "position|heading|goal|goal_id|ee_pos|gripper|holding|box_pos"
 WAREHOUSE_OVERRIDES: dict = {
-    "task": "warehouse_nav",
+    "task": "warehouse_pickup",
     "size": [64, 64],
     "envs": 1,
     "action_repeat": 1,
-    "time_limit": 600,
+    "time_limit": 1000,
     "prefill": 2000,
     "steps": 200000,
     "eval_every": 10000,
     "eval_episode_num": 5,
     "log_every": 1000,
     "compile": False,            # Windows: torch.compile unsupported anyway
-    "encoder": {"mlp_keys": "position|goal|goal_emb|heading", "cnn_keys": "image"},
-    "decoder": {"mlp_keys": "position|goal|goal_emb|heading", "cnn_keys": "image"},
+    "encoder": {"mlp_keys": _MLP_KEYS, "cnn_keys": "image"},
+    "decoder": {"mlp_keys": _MLP_KEYS, "cnn_keys": "image"},
 }
 
 

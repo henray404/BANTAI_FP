@@ -1,9 +1,10 @@
 # models/dreamerv3/obs_adapter.py
 # Person 2 — convert WarehouseGymEnv obs ⇄ NM512 dreamerv3-torch obs.
 #
-# WarehouseGymEnv obs (interface contract):
-#   pixels   (1,3,64,64) float[0,1] CHW   |   position (1,3)   |   goal (1,3)
-#   goal_emb (1,512)                      |   heading  (1,2)
+# WarehouseGymEnv obs (interface contract — pickup v2, 2026-06-08):
+#   pixels  (1,3,64,64) float[0,1] CHW | position (1,3) | heading (1,2) | goal (1,3)
+#   goal_id (1,3) one-hot             | ee_pos (1,3) | gripper (1,1) | holding (1,1)
+#   box_pos (1,3)
 #
 # NM512 expects a per-step dict with:
 #   image (64,64,3) uint8 HWC  + flat float vector keys (matched by encoder regex)
@@ -18,7 +19,8 @@ from __future__ import annotations
 import numpy as np
 
 # Vector obs keys forwarded to the RSSM MLP encoder (config mlp_keys regex must match).
-VECTOR_KEYS = ("position", "goal", "goal_emb", "heading")
+VECTOR_KEYS = ("position", "heading", "goal", "goal_id",
+               "ee_pos", "gripper", "holding", "box_pos")
 
 
 def _np(x):

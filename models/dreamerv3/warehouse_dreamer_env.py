@@ -42,7 +42,8 @@ class WarehouseDreamer:
     @property
     def observation_space(self):
         """Dict space: image (uint8) + flat float vectors (mlp_keys)."""
-        dims = {"position": 3, "goal": 3, "goal_emb": 512, "heading": 2}
+        dims = {"position": 3, "heading": 2, "goal": 3, "goal_id": 3,
+                "ee_pos": 3, "gripper": 1, "holding": 1, "box_pos": 3}
         spaces = {
             k: gym.spaces.Box(-np.inf, np.inf, (dims[k],), dtype=np.float32)
             for k in VECTOR_KEYS
@@ -52,8 +53,8 @@ class WarehouseDreamer:
 
     @property
     def action_space(self):
-        """[linear, angular] in [-1, 1]."""
-        return gym.spaces.Box(-1.0, 1.0, (2,), dtype=np.float32)
+        """[base_lin, base_ang, ee_dx, ee_dy, ee_dz, gripper] in [-1, 1]."""
+        return gym.spaces.Box(-1.0, 1.0, (6,), dtype=np.float32)
 
     def _obs(self, raw: dict, is_first: bool, is_terminal: bool) -> dict:
         """Build the NM512 obs dict from a warehouse obs dict."""
@@ -69,8 +70,8 @@ class WarehouseDreamer:
         return self._obs(raw, is_first=True, is_terminal=False)
 
     def step(self, action):
-        """Apply [linear, angular]; return (obs, reward, done, info)."""
-        action = np.asarray(action, dtype=np.float32).reshape(2)
+        """Apply 6-dim pickup action; return (obs, reward, done, info)."""
+        action = np.asarray(action, dtype=np.float32).reshape(6)
         raw, reward, terminated, truncated, _ = self._env.step(action)
         r = float(np.asarray(_to_np(reward)).reshape(-1)[0])
         term = bool(np.asarray(_to_np(terminated)).reshape(-1)[0])
