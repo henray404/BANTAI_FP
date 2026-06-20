@@ -192,6 +192,7 @@ class EpisodeBuffer:
                 t["obs"], np.asarray(t["action"]),
                 float(t["reward"]),
                 t["next_obs"], bool(t["done"]),
+                track=False,   # don't re-track / re-trigger HER on relabeled transitions
             )
 
     # ── internal ────────────────────────────────────────────────────────
@@ -210,6 +211,7 @@ class EpisodeBuffer:
         reward: float,
         next_obs: dict,
         done: bool,
+        track: bool = True,
     ) -> None:
         if self._obs is None:
             self._alloc(obs, action)
@@ -224,6 +226,12 @@ class EpisodeBuffer:
         self._done[i] = done
         self._ptr = (self._ptr + 1) % self.capacity
         self._full = self._full or self._ptr == 0
+
+        # HER-relabeled transitions are stored with track=False so they are NOT re-appended to the
+        # episode nor re-trigger her_relabel — otherwise a relabeled step with done=True recurses
+        # into her_relabel endlessly (RecursionError). Only real env steps drive episode tracking.
+        if not track:
+            return
 
         # Append to current episode for HER; relabel on done.
         self._episode.append({

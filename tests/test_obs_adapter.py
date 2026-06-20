@@ -30,15 +30,21 @@ def test_pixels_clips_out_of_range():
 
 
 def test_warehouse_obs_to_dreamer_keys():
+    # v2 obs contract: goal_emb was replaced by goal_id (one-hot) + manipulation keys (2026-06-08).
     obs = {
         "pixels":   np.random.rand(1, 3, 64, 64).astype(np.float32),
         "position": np.random.rand(1, 3).astype(np.float32),
-        "goal":     np.random.rand(1, 3).astype(np.float32),
-        "goal_emb": np.random.rand(1, 512).astype(np.float32),
         "heading":  np.random.rand(1, 2).astype(np.float32),
+        "goal":     np.random.rand(1, 3).astype(np.float32),
+        "goal_id":  np.array([[1.0, 0.0, 0.0]], np.float32),
+        "ee_pos":   np.random.rand(1, 3).astype(np.float32),
+        "gripper":  np.random.rand(1, 1).astype(np.float32),
+        "holding":  np.array([[0.0]], np.float32),
+        "box_pos":  np.random.rand(1, 3).astype(np.float32),
     }
     out = warehouse_obs_to_dreamer(obs)
     assert out["image"].shape == (64, 64, 3) and out["image"].dtype == np.uint8
     assert out["position"].shape == (3,)
-    assert out["goal_emb"].shape == (512,)
+    assert out["goal_id"].shape == (3,)
     assert out["heading"].shape == (2,)
+    assert out["box_pos"].shape == (3,)
