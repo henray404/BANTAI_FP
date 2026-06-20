@@ -62,6 +62,7 @@ class Actor(nn.Module):
         min_std: float = 0.1,
         max_std: float = 1.0,
         entropy_scale: float = 3e-4,
+        return_norm_decay: float = 0.99,
     ):
         super().__init__()
         hidden = hidden or [512, 256]
@@ -69,8 +70,12 @@ class Actor(nn.Module):
         self.min_std = min_std
         self.max_std = max_std
         self.entropy_scale = entropy_scale
+        self.return_norm_decay = return_norm_decay
         # Two outputs: mean (action_dim) + log_std (action_dim)
         self.net = _mlp(feat_dim, hidden, action_dim * 2)
+        # EMA of the return range for DreamerV3-style return normalization (C2). Buffer so it
+        # persists across checkpoints. Starts at 1.0 and is clamped >= 1.0 when dividing.
+        self.register_buffer("ret_scale", torch.ones(()))
 
     def _get_dist(self, feat: Tensor) -> torch.distributions.Distribution:
         """Build a TanhNormal distribution from the RSSM feature."""
@@ -111,12 +116,34 @@ class Actor(nn.Module):
         # This is an approximation — exact entropy would require log-det of tanh Jacobian.
         return dist.base_dist.entropy().sum(-1)
 
-    def loss(self, imagine_feat: Tensor, lambda_returns: Tensor) -> Tensor:
-        """Actor loss = -E[lambda_returns * log_prob] - entropy_scale * E[entropy].
+    def _update_return_scale(self, returns: Tensor) -> None:
+        """EMA of the 5th–95th percentile return range (DreamerV3 return normalization, C2)."""
+        with torch.no_grad():
+            flat = returns.detach().flatten()
+            lo = torch.quantile(flat, 0.05)
+            hi = torch.quantile(flat, 0.95)
+            rng = (hi - lo).clamp(min=1e-8)
+            self.ret_scale.mul_(self.return_norm_decay).add_(
+                (1.0 - self.return_norm_decay) * rng
+            )
+
+    def loss(
+        self,
+        imagine_feat: Tensor,
+        lambda_returns: Tensor,
+        values: Tensor | None = None,
+    ) -> Tensor:
+        """Actor loss = -E[adv * log_prob] - entropy_scale * E[entropy].
+
+        adv = (lambda_returns - values) — a value BASELINE is subtracted to cut policy-gradient
+        variance (C1) — then divided by an EMA of the return range for a stable update scale
+        (C2, DreamerV3 return normalization). If `values` is None no baseline is subtracted
+        (backward-compatible with callers/tests that pass only returns).
 
         Args:
             imagine_feat:   (H, B, feat_dim) imagined RSSM features.
             lambda_returns: (H, B) lambda-return targets (detached from critic graph).
+            values:         (H, B) critic baseline V(feat), or None.
 
         Returns:
             Scalar loss tensor.
@@ -126,8 +153,13 @@ class Actor(nn.Module):
         log_prob = log_prob.view(imagine_feat.shape[:2])  # (H, B)
         ent = self.entropy(flat_feat).view(imagine_feat.shape[:2])
 
-        returns_norm = lambda_returns.detach()
-        policy_loss = -(returns_norm * log_prob).mean()
+        adv = lambda_returns.detach()
+        if values is not None:
+            adv = adv - values.detach()                   # C1: baseline → advantage
+        self._update_return_scale(lambda_returns)         # C2: track return range
+        adv = adv / self.ret_scale.clamp(min=1.0)         # C2: normalize advantage scale
+
+        policy_loss = -(adv * log_prob).mean()
         entropy_loss = -self.entropy_scale * ent.mean()
         return policy_loss + entropy_loss
 
