@@ -189,6 +189,7 @@ class P3Trainer:
             config=vars(self.cfg),
             name=f"p3_dreamer_seed{self.cfg.seed}",
             mode=self.cfg.wandb_mode,
+            print_every=0,
         )
 
         # ── Runtime state ─────────────────────────────────────────────
@@ -236,19 +237,19 @@ class P3Trainer:
                 self._obs = next_obs
 
             # Training updates (only after prefill).
+            wm_metrics = {}
+            ac_metrics = {}
             if len(self.buffer) >= self.cfg.prefill_steps:
                 for _ in range(self.cfg.train_ratio):
                     wm_metrics = self._train_world_model()
                     ac_metrics = self._train_actor_critic()
 
-                if self._global_step % self.cfg.log_every_steps == 0:
-                    self.logger.log({**wm_metrics, **ac_metrics}, step=self._global_step)
-
             if self._global_step % self.cfg.log_every_steps == 0:
                 fps = self._global_step / max(time.time() - t0, 1.0)
-                self.logger.log({"train/fps": fps,
-                                 "train/buffer_size": len(self.buffer)},
-                                step=self._global_step)
+                all_metrics = {**wm_metrics, **ac_metrics,
+                               "train/fps": fps,
+                               "train/buffer_size": len(self.buffer)}
+                self.logger.log(all_metrics, step=self._global_step)
 
         self.logger.finish()
 

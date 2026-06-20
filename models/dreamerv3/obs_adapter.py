@@ -18,7 +18,8 @@ from __future__ import annotations
 import numpy as np
 
 # Vector obs keys forwarded to the RSSM MLP encoder (config mlp_keys regex must match).
-VECTOR_KEYS = ("position", "goal", "goal_emb", "heading")
+VECTOR_KEYS = ("position", "heading", "goal", "goal_id",
+                "ee_pos", "gripper", "holding", "box_pos")
 
 
 def _np(x):
