@@ -17,10 +17,16 @@
 | EE action split/scale | ✅ Done | `action_pickup.py`, unit-tested |
 | IK wiring (DifferentialIK) | ✅ Done | `ActionsCfg.arm_ik` (P1 pair) |
 | Grasp loop integrasi | ✅ Done | `WarehouseRLEnv.update_grasp()` |
-| **Curriculum 4-stage** | ❌ **Belum** | helper ada, staging NOL — gap terbesar |
-| **EE control tuning** | ⚠️ Belum divalidasi | konstanta masih nilai awal |
-| **Arm reach end-to-end** | ⚠️ Perlu konfirmasi | banyak fix sesi lalu, belum di-verify lengkap |
-| Carry kinematik vs physics | ⚠️ Perlu keputusan tim | sekarang teleport, bukan jepit fisik |
+| **Curriculum 4-stage** | ✅ Done | env API + per-stage reset + anneal, unit-tested (`curriculum.py`, `warehouse_env.py`); scheduler diserahkan ke P3/P5 |
+| **EE control tuning** | ⚠️ Harness siap, run pending | `scripts/tune_arm.py` — jalankan di sim, paste hasil |
+| **Arm reach end-to-end** | ⚠️ Harness siap, run pending | diverify oleh `scripts/tune_arm.py` (same run) |
+| Carry model | ✅ Diputuskan: physics grasp | FixedJoint weld `panda_hand`↔box (`env/attach.py`), `CARRY_MODE`; kinematic = fallback. **Perlu sim-verify** (GPU PhysX runtime joint) |
+
+> **Update 2026-06-20:** curriculum stage manager + physics grasp dibangun (auto mode).
+> Tersisa SIM-DEPENDENT (butuh Isaac Sim di GPU box, tak bisa headless dari agent):
+> 1. jalankan `python scripts/tune_arm.py` → verify arm reach + kalibrasi `EE_STEP_M`/`GRIP_RADIUS_M`.
+> 2. verify physics-grasp weld bertahan di GPU pipeline (box ikut EE, tak jatuh); kalau gagal set `CARRY_MODE="kinematic"` di `env/warehouse_env.py`.
+> 3. verify Stage-2 spawn-near-box (`_spawn_base_near_box`) drop chassis di samping box.
 
 ---
 
@@ -56,13 +62,16 @@ Dipanggil `WarehouseGymEnv.step` tiap step. Set `grasp_event`/`drop_event`/`hold
 
 ---
 
-## ❌ Belum: Curriculum 4-stage (gap terbesar)
+## ✅ Curriculum 4-stage (selesai — env API)
 
-**Yang ada sekarang:** cuma helper di `env/curriculum.py`:
-- `goal_id_onehot(cat_idx)` — dipakai di `_sample_targets` ✓
-- `anneal_goal(goal_xyz, alpha)` — **TIDAK PERNAH dipanggil** ✗
+**Dibangun 2026-06-20.** Helper pure di `env/curriculum.py` + wiring sim di `env/warehouse_env.py`:
+- `STAGE_NAV/GRASP/FULL/ANNEAL`, `validate_stage`, `stage_is_pregrasped`, `stage_is_spawn_near_box`, `resolve_goal_alpha`, `spawn_pose_near_box` — unit-tested (`tests/test_curriculum.py`).
+- `WarehouseRLEnv.set_stage(n)` / `set_goal_alpha(a)` — API untuk P3/P5.
+- `goal_position()` kali `goal_alpha` (anneal_goal) — default 1.0 = perilaku lama.
+- `_apply_stage_reset`: stage 1 → `_pregrasp_box` (box di-snap ke EE + weld + holding=True); stage 2 → `_spawn_base_near_box` (chassis ditaruh di samping box).
+- **P4 sediakan mekanisme, BUKAN kebijakan transisi** — scheduler (success-rate → naik stage) milik P3 training loop / P5 experiments.
 
-**Yang hilang:** stage manager + wiring. Tidak ada `self.stage`, tidak ada scheduler; `_reset_idx` selalu jalan mode full-chain (`holding=False`, spawn receiving-north).
+**Belum (by design):** scheduler transisi (P3/P5) + sim-verify stage-2 spawn & stage-1 pre-grasp via `scripts/tune_arm.py`.
 
 ### Konsep
 Task full kepanjangan untuk belajar dari nol → reward sparse → policy stuck. Pecah jadi tahap, isolasi tiap skill, gampang→susah.
@@ -107,8 +116,10 @@ Konstanta masih nilai awal, belum dikalibrasi di sim:
 ### Arm reach end-to-end
 Sesi lalu banyak fix arm (sag-gravity, relative-IK lokal — lihat `bugs_errors/2026-06-16_arm-sag-gravity-relative-ik.md`). **Belum diverifikasi** arm bisa reach + grasp box lengkap di sim. Tanpa ini, curriculum & tuning tidak bisa ditest.
 
-### Carry kinematik vs physics grasp
-`_carry_held_boxes()` teleport box ke posisi EE tiap step (kinematik), bukan jepit fisik (friction gripper). Cukup untuk sinyal RL & sudah disengaja (box > bukaan gripper). **Keputusan tim:** apakah ini diterima untuk paper, atau perlu physics grasp? Spec tidak eksplisit minta physics — kemungkinan OK.
+### Carry model — DIPUTUSKAN: physics grasp (2026-06-20)
+Tim pilih **physics grasp**, bukan kinematik teleport. Implementasi: `env/attach.py` weld box ke `panda_hand` pakai `UsdPhysics.FixedJoint` (pola sama dgn `_weld_robot_world_links`) saat grasp; lepas joint saat drop. Box dibawa di bawah physics (berat + collision), bukan disnap tiap step.
+- `CARRY_MODE = "physics"` di `warehouse_env.py`; `"kinematic"` (teleport lama) tetap ada sebagai fallback.
+- **Risiko + perlu sim-verify:** runtime add/remove joint di GPU PhysX pipeline kadang tak ke-pickup. Kalau box jatuh / error → balik ke `CARRY_MODE="kinematic"`. `scripts/tune_arm.py` print prim path `panda_hand` (harus non-None) untuk debug.
 
 ---
 
