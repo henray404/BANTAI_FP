@@ -30,6 +30,7 @@ def test_pixels_clips_out_of_range():
 
 
 def test_warehouse_obs_to_dreamer_keys():
+    # v2 obs contract: goal_emb was replaced by goal_id (one-hot) + manipulation keys (2026-06-08).
     obs = {
         "pixels":   np.random.rand(1, 3, 64, 64).astype(np.float32),
         "position": np.random.rand(1, 3).astype(np.float32),

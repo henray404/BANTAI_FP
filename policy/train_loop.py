@@ -200,6 +200,12 @@ class P3Trainer:
         self._obs, _ = env.reset(seed=self.cfg.seed)
         self._feat = world_model.get_initial_feat(1, self.device)
 
+        # ── Curriculum (P4 mechanism: WarehouseRLEnv.set_stage / set_goal_alpha) ──
+        # P4 exposes the env API; P3 owns the transition policy (sliding success-rate gate below).
+        self._succ_window: list[bool] = []
+        self._stage = int(getattr(self.cfg, "curriculum_start_stage", 1))
+        self._maybe_set_stage(self._stage)
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def run(self, total_steps: int) -> None:
@@ -227,6 +233,10 @@ class P3Trainer:
             self._feat, _, _ = self.wm.imagine_step(self._feat, action_t)
 
             if done:
+                success = self._episode_reward > getattr(
+                    self.cfg, "curriculum_success_reward", 5.0
+                )
+                self._advance_curriculum(success)
                 self._log_episode(t0)
                 self._obs, _ = self.env.reset()
                 self._feat = self.wm.get_initial_feat(1, self.device)
@@ -378,7 +388,12 @@ class P3Trainer:
 
         feats_actor_t = torch.stack(feats_actor)      # (H, B, feat_dim)
 
-        actor_loss = self.actor.loss(feats_actor_t, returns)
+        # Critic baseline V(feat) for the actor advantage (C1 variance reduction).
+        with torch.no_grad():
+            actor_values = self.critic(
+                feats_actor_t.flatten(0, 1).detach()
+            ).squeeze(-1).view(H, B)
+        actor_loss = self.actor.loss(feats_actor_t, returns, actor_values)
         self.actor_opt.zero_grad()
         actor_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.actor_grad_clip)
@@ -396,4 +411,40 @@ class P3Trainer:
             "ep/reward": self._episode_reward,
             "ep/length": self._episode_len,
             "ep/count": self._episode_count,
+            "curriculum/stage": float(getattr(self, "_stage", 3)),
         }, step=self._global_step)
+
+    # ── Curriculum (P4 mechanism, P3 transition policy) ─────────────────────────
+    def _env_inner(self):
+        """Underlying WarehouseRLEnv exposing the curriculum API (set_stage/set_goal_alpha)."""
+        return getattr(self.env, "_env", self.env)
+
+    def _maybe_set_stage(self, stage: int) -> None:
+        """Set the env curriculum stage if enabled and supported (no-op otherwise)."""
+        env = self._env_inner()
+        if getattr(self.cfg, "curriculum_enabled", True) and hasattr(env, "set_stage"):
+            env.set_stage(stage)
+            self._stage = stage
+
+    def _advance_curriculum(self, episode_success: bool) -> None:
+        """Bump stage once a window of recent episodes succeeds; anneal goal xyz in stage 4.
+
+        Sliding success-rate gate. All thresholds read from cfg with safe defaults so this is a
+        no-op on envs without set_stage or when cfg.curriculum_enabled is False.
+        """
+        env = self._env_inner()
+        if not (getattr(self.cfg, "curriculum_enabled", True) and hasattr(env, "set_stage")):
+            return
+        window = int(getattr(self.cfg, "curriculum_window", 20))
+        thresh = float(getattr(self.cfg, "curriculum_success_threshold", 0.6))
+        self._succ_window.append(bool(episode_success))
+        if len(self._succ_window) > window:
+            self._succ_window.pop(0)
+        if (len(self._succ_window) >= window
+                and sum(self._succ_window) / len(self._succ_window) >= thresh
+                and self._stage < 3):
+            self._maybe_set_stage(self._stage + 1)
+            self._succ_window.clear()
+        if self._stage >= 4 and hasattr(env, "set_goal_alpha"):
+            anneal = float(getattr(self.cfg, "goal_anneal_steps", 50_000))
+            env.set_goal_alpha(max(0.0, 1.0 - self._global_step / anneal))

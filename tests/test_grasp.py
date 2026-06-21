@@ -52,7 +52,7 @@ def test_no_grasp_when_open():
 def test_grasp_lost_when_holding_and_ee_leaves_box():
     lost = grasp_lost(
         holding=torch.tensor([True]),
-        ee_pos=_ee(), box_pos=torch.tensor([[0.5, 0.0, 0.30]]),
+        ee_pos=_ee(), box_pos=torch.tensor([[1.0, 0.0, 0.30]]),  # > 2*GRIP_RADIUS_M from surface
         box_half=_BOX_HALF,
     )
     assert bool(lost[0]) is True

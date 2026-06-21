@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 try:
@@ -38,17 +39,27 @@ class Logger:
         mode: str = "online",
         print_every: int = 1000,
     ):
-        """Start a W&B run if available; otherwise fall back to stdout."""
+        """Start a W&B run if available; otherwise fall back to stdout.
+
+        The WANDB_MODE env var (offline/disabled/online) overrides `mode`. If wandb.init fails for
+        any reason (e.g. not logged in, no network), we degrade gracefully to stdout logging instead
+        of crashing the whole training run.
+        """
+        mode = os.environ.get("WANDB_MODE", mode)
         self.enabled = _HAS_WANDB and mode != "disabled"
         self._print_every = print_every
         self._last_print = 0
+        self._run = None
         if self.enabled:
-            self._run = wandb.init(project=project, config=config, name=name, mode=mode)
-        else:
-            self._run = None
-            if not _HAS_WANDB:
-                print("[logger] wandb not installed — logging to stdout only "
-                      "(pip install wandb to enable).")
+            try:
+                self._run = wandb.init(project=project, config=config, name=name, mode=mode)
+            except Exception as exc:  # not logged in / offline / network — don't kill training
+                print(f"[logger] wandb.init failed ({exc!r}); logging to stdout only. "
+                      "Run `wandb login`, or set WANDB_MODE=offline (local) / =disabled.")
+                self.enabled = False
+        elif not _HAS_WANDB:
+            print("[logger] wandb not installed — logging to stdout only "
+                  "(pip install wandb to enable).")
 
     def log(self, metrics: dict[str, Any], step: int | None = None) -> None:
         """Log a dict of scalars. Throttled stdout echo when wandb is absent."""

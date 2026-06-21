@@ -25,6 +25,8 @@
 
 from __future__ import annotations
 
+import math
+
 import gymnasium as gym
 import numpy as np
 import torch
@@ -67,6 +69,23 @@ IMG_HW        = 64    # camera resolution (square)
 MAX_LIN_SPEED = 1.5   # max base linear speed m/s
 MAX_ANG_SPEED = 1.5   # max base yaw rate rad/s
 
+# Carry model (team decision 2026-06-20, revised): default "kinematic" — on grab the box is HIDDEN
+# (not rendered, saves compute + avoids weld glitches) and teleported to follow the robot each step
+# (kinematic carry); it reappears on release/reset. "physics" (UsdPhysics.FixedJoint weld, env.attach)
+# is kept as a fallback for a fully-simulated carry. See docs/progress_p4.md.
+CARRY_MODE = "kinematic"
+
+# Carry anchor: a held box rides at this offset from the chassis (base_link) — in front + raised —
+# so it is VISIBLY lifted in front of the robot instead of snapping into the tucked hand/body mesh.
+GRIP_FWD = 0.6   # metres in front of the chassis (body +x)
+GRIP_UP  = 0.7   # metres above the chassis origin
+
+# Idle/stuck reset: end the episode if the base hasn't translated more than STUCK_MOVE_EPS_M per
+# control step for STUCK_STEPS consecutive steps (~45 s at 10 Hz control) — frees a robot wedged
+# against a wall/rack instead of wasting the full 100 s episode standing still.
+STUCK_MOVE_EPS_M = 0.02
+STUCK_STEPS = 450
+
 
 # ── Custom Observation Functions ──────────────────────────────────────
 def camera_rgb(env: ManagerBasedRLEnv, sensor_name: str = "camera") -> torch.Tensor:
@@ -97,9 +116,14 @@ def robot_position(
 
 
 def goal_position(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """Return current per-env goal xyz, shape (num_envs, 3)."""
+    """Return current per-env goal xyz (num_envs, 3), scaled by the curriculum goal-leak alpha.
+
+    goal_alpha defaults to 1.0 (full leak = legacy behavior); STAGE_ANNEAL drives it toward 0 so
+    the policy must deliver from goal_id + pixels alone. box_pos obs stays UNANNEALED (contract).
+    """
     if hasattr(env, "goal_pos"):
-        return env.goal_pos
+        from env.curriculum import anneal_goal
+        return anneal_goal(env.goal_pos, getattr(env, "goal_alpha", 1.0))
     return torch.zeros(env.num_envs, 3, device=env.device)
 
 
@@ -143,6 +167,13 @@ def box_position(env: ManagerBasedRLEnv) -> torch.Tensor:
     if hasattr(env, "box_pos"):
         return env.box_pos
     return torch.zeros(env.num_envs, 3, device=env.device)
+
+
+def stuck_timeout(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """(num_envs,) bool: base idle (no translation) for >= STUCK_STEPS steps. Reads env._stuck_steps."""
+    if hasattr(env, "_stuck_steps"):
+        return env._stuck_steps >= STUCK_STEPS
+    return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
 
 def robot_heading(
@@ -288,6 +319,7 @@ class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     success  = DoneTerm(func=pickup_delivered)   # held box inside its commanded color zone
     bounds   = DoneTerm(func=out_of_bounds, params={"half_extent_x": 9.5, "half_extent_y": 14.5})
+    stuck    = DoneTerm(func=stuck_timeout)      # base idle ~45 s → reset (wedged in a wall/rack)
 
 
 # ── Env Cfg ───────────────────────────────────────────────────────────
@@ -353,7 +385,36 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         self.holding = torch.zeros(N, dtype=torch.bool, device=dev)
         self.grasp_event = torch.zeros(N, dtype=torch.bool, device=dev)
         self.drop_event = torch.zeros(N, dtype=torch.bool, device=dev)
+        # Idle/stuck detector (see stuck_timeout termination): consecutive idle steps + prev base xy.
+        self._stuck_steps = torch.zeros(N, device=dev)
+        self._prev_base_xy = torch.zeros(N, 2, device=dev)
+        # Curriculum 4-stage manager (env.curriculum). Default STAGE_FULL = legacy full chain.
+        # P3/P5 drive transitions via set_stage()/set_goal_alpha(); P4 provides the mechanism only.
+        from env.curriculum import STAGE_FULL
+        self.stage: int = STAGE_FULL
+        self._anneal_alpha: float = 1.0   # scheduled goal-leak for STAGE_ANNEAL (set externally)
+        self.goal_alpha: float = 1.0      # effective goal-leak applied in goal_position()
+        # Physics-grasp bookkeeping (CARRY_MODE == "physics"): cache USD stage + per-env hand prim.
+        self._usd_stage = None
+        self._hand_prim_path: dict[int, str | None] = {}
         self._sample_targets(torch.arange(N, device=dev))
+
+    # ── Curriculum API (mechanism for P3/P5; they own the transition policy) ──────────
+    def set_stage(self, stage: int) -> None:
+        """Set curriculum stage 1..4. Stages 1-3 force full goal leak; 4 honors goal_alpha.
+
+        Per-stage spawn / pre-grasp take effect on the NEXT _reset_idx; the goal-leak applies
+        immediately via goal_position().
+        """
+        from env.curriculum import resolve_goal_alpha, validate_stage
+        self.stage = validate_stage(stage)
+        self.goal_alpha = resolve_goal_alpha(self.stage, self._anneal_alpha)
+
+    def set_goal_alpha(self, alpha: float) -> None:
+        """Schedule the STAGE_ANNEAL goal-leak in [0,1] (ignored on stages 1-3)."""
+        from env.curriculum import resolve_goal_alpha
+        self._anneal_alpha = float(alpha)
+        self.goal_alpha = resolve_goal_alpha(self.stage, self._anneal_alpha)
 
     def _validate(self) -> None:
         """Assert critical scene entities exist and are correctly configured."""
@@ -378,7 +439,7 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
 
     def _sample_targets(self, env_ids: torch.Tensor) -> None:
         """Per env: pick a commanded category → goal_id one-hot, a target box, and matching zone."""
-        from env.curriculum import goal_id_onehot
+        from env.curriculum import goal_id_onehot, stage_is_pregrasped
         if env_ids.numel() == 0:
             return
         for e in env_ids.tolist():
@@ -388,7 +449,9 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
             self.target_box_name[e] = names[int(torch.randint(0, len(names), (1,)))]
             self.goal_pos[e] = self._zone_pos[c]   # zone order == category order
         self.goal_id_buf[env_ids] = goal_id_onehot(self.box_cat_idx[env_ids], num_cats=3)
-        self.holding[env_ids] = False
+        # Stage 1 (Nav-only) spawns the box already held; the physical pre-grasp (snap+weld) is
+        # applied in _pregrasp_box after the scene reset. All other stages start not-holding.
+        self.holding[env_ids] = stage_is_pregrasped(self.stage)
 
     def _randomize_box_poses(self, env_ids: torch.Tensor) -> None:
         """Random x,y jitter for the 18 bottom-shelf boxes within their shelf-deck area.
@@ -419,12 +482,23 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
             box.write_root_state_to_sim(state, env_ids=env_ids)
 
     def _reset_idx(self, env_ids) -> None:
-        """Sample targets+goals, reset scene, randomize box poses, then refresh target box pos."""
+        """Release held boxes, sample targets+goals, reset scene, randomize, apply stage reset."""
         env_ids_t = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        if CARRY_MODE == "physics":
+            self._detach_boxes(env_ids_t)   # drop any box welded last episode before re-sampling
+        else:
+            self._set_box_visibility(env_ids_t, visible=True)   # un-hide any box hidden during carry
+            self._set_box_collision(env_ids_t, enabled=True)    # re-enable collision after carry
         self._sample_targets(env_ids_t)
         super()._reset_idx(env_ids)
         self._randomize_box_poses(env_ids_t)  # after super() so scene.reset() doesn't undo it
         self._refresh_target_box_pos(env_ids_t)
+        self._apply_stage_reset(env_ids_t)     # stage-2 spawn-near-box / stage-1 pre-grasp
+        # Reset the idle/stuck detector for these envs (prev xy = the new spawn pose).
+        self._stuck_steps[env_ids_t] = 0.0
+        _robot = self.scene["robot"]
+        _bidx = _robot.body_names.index("base_link")
+        self._prev_base_xy[env_ids_t] = _robot.data.body_pos_w[env_ids_t, _bidx, :2]
 
     def _refresh_target_box_pos(self, env_ids: torch.Tensor | None = None) -> None:
         """Write each env's commanded box xyz (env-local) into self.box_pos."""
@@ -448,18 +522,51 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         ee_world = robot.data.body_pos_w[:, ee]
         j = robot.joint_names.index("panda_finger_joint1")
         closed = robot.data.joint_pos[:, j] < 0.0175   # < half of open (0.035)
-        # Grasp on proximity to box SURFACE + gripper closed (boxes are larger than the gripper —
-        # no physical enclosure/lift required; carry is kinematic). box_half = box edge / 2.
+        # MAGNETIC pickup: the arm is frozen (WarehouseGymEnv.step zeros the EE action), so the
+        # robot never reaches/knocks the box — it drives up, stops in front, and the box is grabbed
+        # on PROXIMITY of the (static) hand to the box surface + gripper closed. box_half = box
+        # edge / 2 makes the grip "span" the box size (no physical enclosure; boxes > gripper).
+        # Compare hand and box in the SAME (world) frame; box_pos is env-local so add env_origins.
+        # (Prior code compared base-frame ee_pos to env-local box_pos — mismatched frames, never fired.)
+        box_world = self.box_pos + self.scene.env_origins
         box_half = torch.tensor(
             [self._box_size[self.target_box_name[e]] * 0.5 for e in range(self.num_envs)],
             device=self.device,
         )
-        newly = grasp_success(self.ee_pos, self.box_pos, closed, box_half) & (~self.holding)
-        lost = grasp_lost(self.holding, self.ee_pos, self.box_pos, box_half) | (~closed & self.holding)
+        newly = grasp_success(ee_world, box_world, closed, box_half) & (~self.holding)
+        # Once grabbed, the box is welded to the chassis and rides up to the carry anchor (away from
+        # the frozen hand), so the geometric grasp_lost would false-trigger. A welded box can't
+        # drift — release it ONLY when the gripper opens.
+        lost = (~closed) & self.holding
         self.grasp_event = newly
         self.drop_event = lost & (~self._box_in_any_zone())
         self.holding = (self.holding | newly) & (~lost)
-        self._carry_held_boxes(ee_world)
+        anchor = self._grip_anchor_world()   # carry point in front of + above the chassis
+        if CARRY_MODE == "physics":
+            self._apply_physics_grasp(newly, lost, anchor)
+        else:
+            # Hidden-kinematic carry: on grab HIDE the box + DISABLE its collision (so the box that
+            # follows the robot doesn't ram the racks) — no render, no physics push, cheaper; on
+            # release show it + re-enable collision. Then teleport held boxes to follow the robot.
+            grabbed = torch.nonzero(newly, as_tuple=False).flatten()
+            dropped = torch.nonzero(lost, as_tuple=False).flatten()
+            self._set_box_visibility(grabbed, visible=False)
+            self._set_box_collision(grabbed, enabled=False)
+            self._set_box_visibility(dropped, visible=True)
+            self._set_box_collision(dropped, enabled=True)
+            self._carry_held_boxes(anchor)
+
+    def _update_stuck(self) -> None:
+        """Count consecutive idle (no-translation) control steps for the stuck_timeout termination."""
+        robot: Articulation = self.scene["robot"]
+        bidx = robot.body_names.index("base_link")
+        xy = robot.data.body_pos_w[:, bidx, :2]
+        moved = torch.norm(xy - self._prev_base_xy, dim=-1)
+        self._prev_base_xy = xy.clone()
+        idle = moved < STUCK_MOVE_EPS_M
+        self._stuck_steps = torch.where(
+            idle, self._stuck_steps + 1.0, torch.zeros_like(self._stuck_steps)
+        )
 
     def _box_in_any_zone(self) -> torch.Tensor:
         """(N,) bool: target box xy within 1.5 m of its commanded zone center (env-local)."""
@@ -475,6 +582,160 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
             state[:, 0:3] = ee_world[e:e + 1]
             state[:, 7:13] = 0.0  # zero linear + angular velocity
             box.write_root_state_to_sim(state, env_ids=torch.tensor([e], device=self.device))
+
+    # ── Physics grasp (CARRY_MODE == "physics") ──────────────────────────────────────
+    def _ensure_stage(self):
+        """Lazily fetch + cache the USD stage (only needed for physics grasp)."""
+        if self._usd_stage is None:
+            import omni.usd
+            self._usd_stage = omni.usd.get_context().get_stage()
+        return self._usd_stage
+
+    def _box_prim_path(self, e: int) -> str:
+        """Resolved rigid-body prim path of env e's target box."""
+        return f"/World/envs/env_{e}/{self.target_box_name[e]}"
+
+    def _base_link_path(self, e: int) -> str:
+        """Resolved chassis (base_link) prim path — the carry weld parent (box rides in front)."""
+        return f"/World/envs/env_{e}/Robot/base_link"
+
+    def _set_box_visibility(self, env_ids: torch.Tensor, visible: bool) -> None:
+        """Show/hide each env's target box prim (hidden-kinematic carry: box not rendered while held)."""
+        ids = env_ids.tolist() if hasattr(env_ids, "tolist") else list(env_ids)
+        if not ids:
+            return
+        from pxr import UsdGeom
+        stage = self._ensure_stage()
+        for e in ids:
+            img = UsdGeom.Imageable(stage.GetPrimAtPath(self._box_prim_path(e)))
+            (img.MakeVisible if visible else img.MakeInvisible)()
+
+    def _set_box_collision(self, env_ids: torch.Tensor, enabled: bool) -> None:
+        """Enable/disable collision on each env's target box (off while carried so it can't hit racks)."""
+        ids = env_ids.tolist() if hasattr(env_ids, "tolist") else list(env_ids)
+        if not ids:
+            return
+        from pxr import Usd, UsdPhysics
+        stage = self._ensure_stage()
+        for e in ids:
+            root = stage.GetPrimAtPath(self._box_prim_path(e))
+            for prim in Usd.PrimRange(root):
+                if prim.HasAPI(UsdPhysics.CollisionAPI):
+                    UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Set(enabled)
+
+    def _grip_anchor_world(self) -> torch.Tensor:
+        """World-frame carry point (N,3): in front of + above the chassis, where a held box rides."""
+        robot: Articulation = self.scene["robot"]
+        base = robot.body_names.index("base_link")
+        base_w = robot.data.body_pos_w[:, base].clone()         # (N,3)
+        quat = robot.data.body_quat_w[:, base]                  # (w,x,y,z)
+        yaw = torch.atan2(
+            2.0 * (quat[:, 0] * quat[:, 3] + quat[:, 1] * quat[:, 2]),
+            1.0 - 2.0 * (quat[:, 2] ** 2 + quat[:, 3] ** 2),
+        )
+        base_w[:, 0] += GRIP_FWD * torch.cos(yaw)
+        base_w[:, 1] += GRIP_FWD * torch.sin(yaw)
+        base_w[:, 2] += GRIP_UP
+        return base_w
+
+    def _hand_path(self, e: int) -> str | None:
+        """Resolved panda_hand LINK prim path for env e (cached; traverses Robot subtree once)."""
+        if e not in self._hand_prim_path:
+            from env.attach import find_descendant_path
+            self._hand_prim_path[e] = find_descendant_path(
+                self._ensure_stage(), f"/World/envs/env_{e}/Robot", "panda_hand"
+            )
+        return self._hand_prim_path[e]
+
+    def _snap_boxes_to_ee(self, env_ids: torch.Tensor, ee_world: torch.Tensor) -> None:
+        """Teleport each given env's target box to the EE (used just before a physics weld)."""
+        for e in env_ids.tolist():
+            box = self.scene[self.target_box_name[e]]
+            state = box.data.root_state_w[e:e + 1].clone()
+            state[:, 0:3] = ee_world[e:e + 1]
+            state[:, 7:13] = 0.0
+            box.write_root_state_to_sim(state, env_ids=torch.tensor([e], device=self.device))
+
+    def _attach_boxes(self, env_ids: torch.Tensor) -> None:
+        """FixedJoint-weld each env's target box to its panda_hand (physics carry)."""
+        from env.attach import attach_box
+        stage = self._ensure_stage()
+        for e in env_ids.tolist():
+            # Weld the box to the CHASSIS (base_link), not the tucked hand, so it rides visibly in
+            # front (the box was just snapped to _grip_anchor_world, so the weld transform is clean).
+            attach_box(stage, self._base_link_path(e), self._box_prim_path(e))
+
+    def _detach_boxes(self, env_ids: torch.Tensor) -> None:
+        """Remove any grasp FixedJoint on each env's target box."""
+        from env.attach import detach_box
+        stage = self._ensure_stage()
+        for e in env_ids.tolist():
+            detach_box(stage, self._box_prim_path(e))
+
+    def _apply_physics_grasp(self, newly: torch.Tensor, released: torch.Tensor,
+                             ee_world: torch.Tensor) -> None:
+        """Weld newly-grasped boxes to the hand; unweld released ones (replaces kinematic carry)."""
+        newly_ids = torch.nonzero(newly, as_tuple=False).flatten()
+        if newly_ids.numel():
+            self._snap_boxes_to_ee(newly_ids, ee_world)  # clean relative transform at weld time
+            self._attach_boxes(newly_ids)
+        rel_ids = torch.nonzero(released, as_tuple=False).flatten()
+        if rel_ids.numel():
+            self._detach_boxes(rel_ids)
+
+    # ── Per-stage reset (Stage 1 pre-grasp, Stage 2 spawn-near-box) ───────────────────
+    def _apply_stage_reset(self, env_ids: torch.Tensor) -> None:
+        """Apply stage-2 spawn-near-box and stage-1 pre-grasp overrides after the normal reset."""
+        from env.curriculum import stage_is_pregrasped, stage_is_spawn_near_box
+        if stage_is_spawn_near_box(self.stage):
+            self._spawn_base_near_box(env_ids)
+        if stage_is_pregrasped(self.stage):
+            self._pregrasp_box(env_ids)
+
+    def _spawn_base_near_box(self, env_ids: torch.Tensor) -> None:
+        """Stage 2: place the chassis within Franka reach of the target box, facing it.
+
+        Overrides the receiving-north spawn from EventCfg.reset_robot. Writes the robot ROOT pose
+        (the welded fixed-base anchor) and zeros the dummy base joints so base_link lands at the
+        root pose. box_pos must already be refreshed (called after _refresh_target_box_pos).
+        VERIFY in sim: confirm base_link lands beside the box (scripts/tune_arm.py / drive_env.py).
+        """
+        from env.curriculum import spawn_pose_near_box
+        robot: Articulation = self.scene["robot"]
+        root = robot.data.root_state_w.clone()  # (N,13) world frame: pos3+quat4+linvel3+angvel3
+        for e in env_ids.tolist():
+            bx, by = float(self.box_pos[e, 0]), float(self.box_pos[e, 1])
+            # Size-aware standoff (tuned 2026-06-20). Arm is FROZEN (magnetic pickup), so the hand
+            # sits ~0.4 m in front of the base and never reaches out — spawn the base CLOSE enough
+            # that the static hand lands within GRIP_RADIUS_M of the box surface (else it never
+            # grabs, the 0.8 m "kejauhan" bug). Heavy boxes are bigger so their face is nearer →
+            # slightly closer standoff. Tune in sim with scripts/demo_pickup.py.
+            standoff = 0.55 if self._box_size[self.target_box_name[e]] > 0.4 else 0.65
+            base_x, base_y, yaw = spawn_pose_near_box((bx, by), standoff=standoff)
+            origin = self.scene.env_origins[e]
+            root[e, 0] = origin[0] + base_x
+            root[e, 1] = origin[1] + base_y
+            half = yaw * 0.5
+            root[e, 3] = math.cos(half)   # qw
+            root[e, 4] = 0.0              # qx
+            root[e, 5] = 0.0              # qy
+            root[e, 6] = math.sin(half)   # qz (yaw about world z)
+            root[e, 7:13] = 0.0
+        robot.write_root_state_to_sim(root, env_ids=env_ids)
+        base_ids, _ = robot.find_joints(
+            ["dummy_base_prismatic_x_joint", "dummy_base_prismatic_y_joint",
+             "dummy_base_revolute_z_joint"], preserve_order=True,
+        )
+        zeros = torch.zeros(env_ids.numel(), len(base_ids), device=self.device)
+        robot.write_joint_state_to_sim(zeros, zeros, joint_ids=base_ids, env_ids=env_ids)
+
+    def _pregrasp_box(self, env_ids: torch.Tensor) -> None:
+        """Stage 1: start with the target box already held (snap to EE + weld + holding=True)."""
+        anchor = self._grip_anchor_world()
+        self._snap_boxes_to_ee(env_ids, anchor)
+        if CARRY_MODE == "physics":
+            self._attach_boxes(env_ids)
+        self.holding[env_ids] = True
 
 
 # ── Gymnasium Wrapper ─────────────────────────────────────────────────
@@ -586,10 +847,15 @@ class WarehouseGymEnv(gym.Env):
             action = action.unsqueeze(0).expand(self.num_envs, -1)
         action = action.clamp(-1.0, 1.0).to(self.device, dtype=torch.float32)
         base2, ee3, grip1 = split_action(action)
+        # ARM FROZEN: magnetic pickup. The arm holds its tucked/ready pose (zero IK delta) so the
+        # robot never reaches out and KNOCKS the box — it drives up, stops in front, and the box is
+        # grabbed on proximity (see update_grasp). The EE action channels are ignored on purpose.
+        ee3 = torch.zeros_like(ee3)
         base3 = self._base_cmd(base2)                       # (N,3) base joint velocities
         internal = torch.cat([base3, ee3, grip1], dim=-1)   # (N,7) base(3)+ik(3)+gripper(1)
         obs, reward, terminated, truncated, info = self._env.step(internal)
         self._env.update_grasp()                            # holding + grasp/drop events, carry box
+        self._env._update_stuck()                           # idle detector for stuck_timeout reset
         return self._unwrap_obs(obs), reward, terminated, truncated, info
 
     def render(self):

@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import torch
 
-GRIP_RADIUS_M = 0.10  # EE must be within this of the box SURFACE to count as a contact-grasp
+# EE must be within this of the box SURFACE (size-aware: box_half is subtracted) to count as a
+# contact-grasp. Tuned 2026-06-20 via scripts/tune_arm.py: all 3 categories reach < 0.083 m at
+# their best standoff, so 0.15 gives generous "magic-attach" slack (robot stops in front, the box
+# welds to the hand without the gripper enclosing it) while staying small enough to avoid latching
+# the wrong box — grasp_success only ever checks the COMMANDED target box, so a wider radius is safe.
+GRIP_RADIUS_M = 0.25
 
 
 def grasp_success(
