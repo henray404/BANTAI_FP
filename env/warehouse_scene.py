@@ -259,6 +259,24 @@ RACK_RED = (0.55, 0.06, 0.06)
 
 RACK_SHELF_Z = RACK_SHELF_LEVELS[-1]     # top shelf z (kept for explore_scene hint)
 
+# ── Rack footprint collider (robot base clips through the open USD frame) ──
+# The Rack_L01 USD authors no/poor colliders on its open-frame uprights, so the wheeled base
+# drives straight through the empty space between them — the rack's own CollisionPropertiesCfg
+# only blocks against the shelf decks. See bugs_errors/2026-06-21_base-clips-through-racks.md
+# (hypothesis 2). Fix: spawn one explicit solid box collider at each rack's footprint so the
+# base has something physical to hit. Kept LOW (small z) so it stops the chassis but the arm
+# can still reach over it to grasp boxes on the floor / shelves.
+# TUNE SIZE + OFFSET to the measured rack footprint (asset_sandbox/scripts/explore_rack.py).
+# ponytail: low plinth blocks the base, not the full rack height — raise z if the arm column
+#           or gripper also clips the frame above the plinth.
+RACK_COLLIDER_ENABLED = False  # OFF: rack USD now ships its own baked collider (Isaac Sim, path A).
+#                                Set True again to re-add the footprint plinth fallback.
+RACK_COLLIDER_SIZE    = (1.20, 0.90, 0.50)  # (x, y, z) m — footprint + low height. PLACEHOLDER, tune.
+RACK_COLLIDER_OFFSET  = (0.0, 0.0, 0.25)    # (dx, dy, dz) m from rack origin; dz = size_z/2 → sits on floor.
+RACK_COLLIDER_COLOR   = None                # None = collision-only (no material node, default grey);
+#                                             set a (r,g,b) to see/debug it. None avoids 18 extra SDP
+#                                             material nodes on Blackwell (see sdp-camera-crash bug).
+
 # 18 target boxes: one per rack, on the FLOOR in front of the rack (within Franka reach).
 # Category cycles fragile/regular/heavy by rack index -> 6 of each across 18 racks.
 # Boxes are graspable rigid bodies; the commanded box is selected at runtime by goal_id.
@@ -311,6 +329,34 @@ def _rack_cfg(idx: int, pos: tuple) -> AssetBaseCfg:
             usd_path=RACK_USD,
             scale=(0.01, 0.01, 0.01),
             collision_props=sim_utils.CollisionPropertiesCfg(),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=pos),
+    )
+
+
+def _rack_collider_cfg(idx: int, rack_pos: tuple) -> AssetBaseCfg:
+    """Solid box collider at a rack's footprint — blocks the base from clipping the open frame.
+
+    The Rack_L01 USD frame has no usable collider on its uprights; this explicit cuboid gives
+    the base something solid to hit. Position = rack origin + RACK_COLLIDER_OFFSET. Tune
+    RACK_COLLIDER_SIZE/OFFSET to the measured rack footprint.
+    """
+    pos = (
+        rack_pos[0] + RACK_COLLIDER_OFFSET[0],
+        rack_pos[1] + RACK_COLLIDER_OFFSET[1],
+        rack_pos[2] + RACK_COLLIDER_OFFSET[2],
+    )
+    mat = (
+        sim_utils.PreviewSurfaceCfg(diffuse_color=RACK_COLLIDER_COLOR)
+        if RACK_COLLIDER_COLOR is not None
+        else None
+    )
+    return AssetBaseCfg(
+        prim_path=f"{{ENV_REGEX_NS}}/rack_collider_{idx}",
+        spawn=sim_utils.CuboidCfg(
+            size=RACK_COLLIDER_SIZE,
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            visual_material=mat,
         ),
         init_state=AssetBaseCfg.InitialStateCfg(pos=pos),
     )
@@ -479,12 +525,15 @@ class WarehouseSceneCfg(InteractiveSceneCfg):
         """Register racks + shelf decks + boxes + props as scene attributes.
 
         - 18 racks (static USD)
+        - 18 rack footprint colliders (if RACK_COLLIDER_ENABLED — solid box, blocks base clipping)
         - 54 shelf decks (18 racks × 3 levels, invisible CuboidCfg — solid collision surface)
         - 18 boxes (RigidObjectCfg — gravity, one per rack on the floor in front, within Franka reach)
         - 11 props (static USD)
         """
         for i, rack_pos in enumerate(RACK_POSITIONS):
             setattr(self, f"rack_{i}", _rack_cfg(i, rack_pos))
+            if RACK_COLLIDER_ENABLED:
+                setattr(self, f"rack_collider_{i}", _rack_collider_cfg(i, rack_pos))
             for j, shelf_z in enumerate(RACK_SHELF_LEVELS):
                 setattr(self, f"shelf_{i}_{j}", _shelf_deck_cfg(i, j, rack_pos, shelf_z))
         for name, size, mass, pos in ITEM_SPECS:
