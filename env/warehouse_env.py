@@ -410,6 +410,7 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         self._usd_stage = None
         self._hand_prim_path: dict[int, str | None] = {}
         self._sample_targets(torch.arange(N, device=dev))
+        self._disable_arm_collisions()   # frozen arm is non-functional here — stop it snagging racks
 
     # ── Curriculum API (mechanism for P3/P5; they own the transition policy) ──────────
     def set_stage(self, stage: int) -> None:
@@ -568,6 +569,24 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
             self._set_box_collision(dropped, enabled=True)
             self._carry_held_boxes(anchor)
 
+    def _freeze_arm(self) -> None:
+        """Kinematically pin the 7 arm joints to their home pose each step (rigid scenery).
+
+        The arm is driven by relative-mode IK with a zero EE delta, which only commands "stay at the
+        CURRENT pose" — base acceleration then nudges the arm and it drifts/flails with no restoring
+        force back to home. Since the arm never actuates here (grasp is magnetic, box rides on
+        base_link), overwrite the arm joint state to the home config + zero velocity so it stays rigid
+        relative to the chassis. See bugs_errors/2026-06-21_frozen-arm-snags-racks.md.
+        """
+        robot: Articulation = self.scene["robot"]
+        if not hasattr(self, "_arm_joint_ids"):
+            self._arm_joint_ids, _ = robot.find_joints(
+                [f"panda_joint{i}" for i in range(1, 8)], preserve_order=True
+            )
+            self._arm_home = robot.data.default_joint_pos[:, self._arm_joint_ids].clone()
+        zeros = torch.zeros_like(self._arm_home)
+        robot.write_joint_state_to_sim(self._arm_home, zeros, joint_ids=self._arm_joint_ids)
+
     def _update_stuck(self) -> None:
         """Count consecutive idle (no-translation) control steps for the stuck_timeout termination."""
         robot: Articulation = self.scene["robot"]
@@ -602,6 +621,24 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
             import omni.usd
             self._usd_stage = omni.usd.get_context().get_stage()
         return self._usd_stage
+
+    def _disable_arm_collisions(self) -> None:
+        """Turn off collision on every Franka arm/hand link so the frozen arm can't snag racks.
+
+        The grasp is magnetic (proximity, not physical contact) and the carried box is welded to
+        base_link, so the arm colliders serve no purpose and only catch on rack frames mid-carry.
+        Base/chassis colliders (path has no '/panda_') are left intact so the base still blocks
+        against racks and avoidance still works.
+        """
+        from pxr import Usd, UsdPhysics
+        stage = self._ensure_stage()
+        for e in range(self.num_envs):
+            root = stage.GetPrimAtPath(f"/World/envs/env_{e}/Robot")
+            if not root.IsValid():
+                continue
+            for prim in Usd.PrimRange(root):
+                if "/panda_" in prim.GetPath().pathString and prim.HasAPI(UsdPhysics.CollisionAPI):
+                    UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Set(False)
 
     def _box_prim_path(self, e: int) -> str:
         """Resolved rigid-body prim path of env e's target box."""
@@ -661,17 +698,33 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
             box = self.scene[self.target_box_name[e]]
             state = box.data.root_state_w[e:e + 1].clone()
             state[:, 0:3] = ee_world[e:e + 1]
+            state[:, 3:7] = 0.0
+            state[:, 3] = 1.0      # upright (qw=1) so the welded relative rotation is deterministic
             state[:, 7:13] = 0.0
             box.write_root_state_to_sim(state, env_ids=torch.tensor([e], device=self.device))
 
-    def _attach_boxes(self, env_ids: torch.Tensor) -> None:
-        """FixedJoint-weld each env's target box to its panda_hand (physics carry)."""
+    def _attach_boxes(self, env_ids: torch.Tensor, anchor: torch.Tensor) -> None:
+        """FixedJoint-weld each env's target box to base_link at the carry anchor (physics carry).
+
+        Authors the joint's body0 anchor = box pose in the base_link frame, so PhysX holds the box
+        exactly where it was snapped (in front of + above the chassis) instead of yanking it onto
+        the base_link origin. `anchor` (N,3) = the world carry point the box was just snapped to.
+        """
         from env.attach import attach_box
+        from isaaclab.utils.math import subtract_frame_transforms
         stage = self._ensure_stage()
+        robot: Articulation = self.scene["robot"]
+        base = robot.body_names.index("base_link")
+        p_b = robot.data.body_pos_w[:, base]                       # (N,3) chassis world pos
+        q_b = robot.data.body_quat_w[:, base]                      # (N,4) chassis world quat
+        q_box = torch.zeros_like(q_b); q_box[:, 0] = 1.0           # box upright (matches snap)
+        # Box pose expressed in the base_link frame = the joint's body0 local anchor.
+        p_rel, q_rel = subtract_frame_transforms(p_b, q_b, anchor, q_box)
         for e in env_ids.tolist():
-            # Weld the box to the CHASSIS (base_link), not the tucked hand, so it rides visibly in
-            # front (the box was just snapped to _grip_anchor_world, so the weld transform is clean).
-            attach_box(stage, self._base_link_path(e), self._box_prim_path(e))
+            attach_box(
+                stage, self._base_link_path(e), self._box_prim_path(e),
+                local_pos0=tuple(p_rel[e].tolist()), local_rot0=tuple(q_rel[e].tolist()),
+            )
 
     def _detach_boxes(self, env_ids: torch.Tensor) -> None:
         """Remove any grasp FixedJoint on each env's target box."""
@@ -686,10 +739,15 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         newly_ids = torch.nonzero(newly, as_tuple=False).flatten()
         if newly_ids.numel():
             self._snap_boxes_to_ee(newly_ids, ee_world)  # clean relative transform at weld time
-            self._attach_boxes(newly_ids)
+            self._attach_boxes(newly_ids, ee_world)
+            # Box rides 0.6 m in front of the chassis; with collision ON it rams the rack the box was
+            # just lifted off and pins the base. Delivery is position-based (box_pos vs zone), so the
+            # carried box needs no collision — turn it off while held (re-enabled on release).
+            self._set_box_collision(newly_ids, enabled=False)
         rel_ids = torch.nonzero(released, as_tuple=False).flatten()
         if rel_ids.numel():
             self._detach_boxes(rel_ids)
+            self._set_box_collision(rel_ids, enabled=True)
 
     # ── Per-stage reset (Stage 1 pre-grasp, Stage 2 spawn-near-box) ───────────────────
     def _apply_stage_reset(self, env_ids: torch.Tensor) -> None:
@@ -713,12 +771,19 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         root = robot.data.root_state_w.clone()  # (N,13) world frame: pos3+quat4+linvel3+angvel3
         for e in env_ids.tolist():
             bx, by = float(self.box_pos[e, 0]), float(self.box_pos[e, 1])
-            # Size-aware standoff (tuned 2026-06-20). Arm is FROZEN (magnetic pickup), so the hand
-            # sits ~0.4 m in front of the base and never reaches out — spawn the base CLOSE enough
-            # that the static hand lands within GRIP_RADIUS_M of the box surface (else it never
-            # grabs, the 0.8 m "kejauhan" bug). Heavy boxes are bigger so their face is nearer →
-            # slightly closer standoff. Tune in sim with scripts/demo_pickup.py.
-            standoff = 0.55 if self._box_size[self.target_box_name[e]] > 0.4 else 0.65
+            # Standoff must CLEAR the rack: box sits at the rack centre, the rack/shelf-deck footprint
+            # is ~0.9 m deep (SHELF_DECK_SIZE) and the Ridgeback base is ~0.96 m long (~0.5 m half),
+            # so a base centre nearer than ~0.85 m spawns INSIDE the rack and the sim explodes (see
+            # bugs_errors/2026-06-21_stage2-spawn-inside-rack.md). Spawn in the open aisle and let the
+            # demo controller / policy drive the last ~0.4 m in for the magnetic grab. Heavy boxes are
+            # bigger → slightly larger standoff. Tune in sim with scripts/demo_pickup.py.
+            # Optional (small, heavy) override set by the demo's tuning config; default clears rack.
+            small_h = getattr(self, "_spawn_standoff", None)
+            heavy = self._box_size[self.target_box_name[e]] > 0.4
+            if small_h is not None:
+                standoff = small_h[1] if heavy else small_h[0]
+            else:
+                standoff = 1.1 if heavy else 1.0
             base_x, base_y, yaw = spawn_pose_near_box((bx, by), standoff=standoff)
             origin = self.scene.env_origins[e]
             root[e, 0] = origin[0] + base_x
@@ -742,7 +807,7 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         anchor = self._grip_anchor_world()
         self._snap_boxes_to_ee(env_ids, anchor)
         if CARRY_MODE == "physics":
-            self._attach_boxes(env_ids)
+            self._attach_boxes(env_ids, anchor)
         self.holding[env_ids] = True
 
 
@@ -862,6 +927,7 @@ class WarehouseGymEnv(gym.Env):
         base3 = self._base_cmd(base2)                       # (N,3) base joint velocities
         internal = torch.cat([base3, ee3, grip1], dim=-1)   # (N,7) base(3)+ik(3)+gripper(1)
         obs, reward, terminated, truncated, info = self._env.step(internal)
+        self._env._freeze_arm()                             # pin arm to home pose (no drift/flail)
         self._env.update_grasp()                            # holding + grasp/drop events, carry box
         self._env._update_stuck()                           # idle detector for stuck_timeout reset
         return self._unwrap_obs(obs), reward, terminated, truncated, info

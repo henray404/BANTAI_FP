@@ -281,7 +281,8 @@ def main(config):
         logger.step += prefill * config.action_repeat
         print(f"Logger: ({logger.step} steps).")
 
-    print("Simulate agent.")
+    print("Simulate agent.", flush=True)
+    print("[DIAG] building dataset + agent...", flush=True)
     train_dataset = make_dataset(train_eps, config)
     eval_dataset = make_dataset(eval_eps, config)
     agent = Dreamer(
@@ -291,6 +292,7 @@ def main(config):
         logger,
         train_dataset,
     ).to(config.device)
+    print("[DIAG] agent built OK", flush=True)
     agent.requires_grad_(requires_grad=False)
     if (logdir / "latest.pt").exists():
         checkpoint = torch.load(logdir / "latest.pt")
@@ -299,6 +301,10 @@ def main(config):
         agent._should_pretrain._once = False
 
     # make sure eval will be executed once after config.steps
+    print(f"[DIAG] loop entry: agent._step={agent._step} logger.step={logger.step} "
+          f"config.steps={config.steps} eval_every={config.eval_every} "
+          f"bound={config.steps + config.eval_every} count_traindir={count_steps(config.traindir)}",
+          flush=True)
     while agent._step < config.steps + config.eval_every:
         logger.write()
         if config.eval_episode_num > 0:

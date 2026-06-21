@@ -4,7 +4,41 @@
 
 from __future__ import annotations
 
+import math
+
 _CATEGORIES = ("fragile", "regular", "heavy")
+
+
+def avoidance_heading(
+    target_xy: tuple[float, float],
+    base_xy: tuple[float, float],
+    islands: list[tuple[float, float]],
+    influence: float,
+    push: float,
+    skip_near_target: float,
+) -> tuple[float, float]:
+    """Potential-field steering: (desired_heading_rad, distance_to_target).
+
+    Unit attraction vector toward `target_xy` plus, for each island within `influence` metres of
+    `base_xy`, a repulsion pointing away from that island scaled by closeness. The island within
+    `skip_near_target` of the target is ignored (else the base can never reach a box on a shelf).
+    Pure geometry — no Isaac. Used by scripts/demo_pickup.py for rack avoidance.
+    """
+    ax, ay = target_xy[0] - base_xy[0], target_xy[1] - base_xy[1]
+    dist = math.hypot(ax, ay)
+    sx, sy = ax / (dist or 1e-6), ay / (dist or 1e-6)
+    for ix, iy in islands:
+        if math.hypot(target_xy[0] - ix, target_xy[1] - iy) < skip_near_target:
+            continue  # target sits on this island — don't push away from it
+        dx, dy = base_xy[0] - ix, base_xy[1] - iy
+        dd = math.hypot(dx, dy)
+        if 1e-3 < dd < influence:
+            # Inverse-distance (classic potential field): blows up as the base nears the rack,
+            # decays to 0 at the influence edge → strong shove when close, open aisles when far.
+            w = push * (1.0 / dd - 1.0 / influence)
+            sx += w * dx / dd
+            sy += w * dy / dd
+    return math.atan2(sy, sx), dist
 
 # ── Module-level constants matching warehouse_scene.py defaults ───────────────
 # Exported so tests can verify box specs without importing Isaac Lab / pxr.

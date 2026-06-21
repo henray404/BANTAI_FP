@@ -148,6 +148,11 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except BaseException:  # noqa: BLE001 — diagnostic: surface the real error before close() hides it
+        import traceback
+        print("[DIAG] main() raised:", flush=True)
+        traceback.print_exc()
+        raise
     finally:
         if _SHARED_ENV["gym"] is not None:
             _SHARED_ENV["gym"].close()

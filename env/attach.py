@@ -44,13 +44,21 @@ def find_descendant_path(stage, root_path: str, name: str) -> str | None:
     return None
 
 
-def attach_box(stage, hand_prim_path: str, box_prim_path: str) -> bool:
+def attach_box(
+    stage,
+    hand_prim_path: str,
+    box_prim_path: str,
+    local_pos0: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    local_rot0: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
+) -> bool:
     """Weld `box_prim_path` to `hand_prim_path` with a FixedJoint. Idempotent. Returns created?.
 
-    PhysX freezes the body0→body1 relative transform at definition time, so the box stays wherever
-    it is relative to the hand at grasp. Call after the box has been positioned at the EE.
+    `local_pos0`/`local_rot0` = the box pose expressed in body0 (hand/chassis) frame; the box
+    (body1) is anchored at its own origin. These MUST be authored — without them PhysX defaults
+    both anchors to identity and yanks the box onto the body0 origin (box "flies", then rides with
+    the robot). See bugs_errors/2026-06-21_grasp-box-flies-unanchored-fixedjoint.md.
     """
-    from pxr import Sdf, UsdPhysics
+    from pxr import Gf, Sdf, UsdPhysics
 
     jp = Sdf.Path(grasp_joint_path(box_prim_path))
     if stage.GetPrimAtPath(jp).IsValid():
@@ -58,6 +66,10 @@ def attach_box(stage, hand_prim_path: str, box_prim_path: str) -> bool:
     joint = UsdPhysics.FixedJoint.Define(stage, jp)
     joint.CreateBody0Rel().SetTargets([Sdf.Path(hand_prim_path)])
     joint.CreateBody1Rel().SetTargets([Sdf.Path(box_prim_path)])
+    joint.CreateLocalPos0Attr().Set(Gf.Vec3f(*local_pos0))
+    joint.CreateLocalRot0Attr().Set(Gf.Quatf(*local_rot0))   # (w, x, y, z)
+    joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+    joint.CreateLocalRot1Attr().Set(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
     return True
 
 

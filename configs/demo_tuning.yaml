@@ -1,0 +1,35 @@
+# Tuning knobs for the scripted pickup demo (scripts/demo_pickup.py).
+#
+#   conda activate isaaclab
+#   python scripts/demo_pickup.py --config configs/demo_tuning.yaml --episodes 1 --log_csv demo_loc.csv
+#
+# Only keys present here override the code defaults; delete a key to keep its default.
+# Change ONE value at a time, re-run, read the `move` column in the log. Arrows = which way to push.
+
+controller:
+  face_tol: 1.4         # rad — hard-stop forward drive only when nearly perpendicular (~80°). Below it
+                        #       speed tapers as cos(err), so the base drives WHILE turning (no spin-stall)
+  ang_gain: 2.0         # yaw P-gain. UP = snappier turn; too high = wobble
+  lin_gain: 1.0         # distance P-gain. UP = faster approach
+  deliver_radius: 1.4   # m — base within this of zone ends the episode (demo-side success stop)
+
+avoidance:
+  influence: 1.8        # m — rack repulsion reach. DOWN if aisles feel blocked; UP if it grazes racks
+  push: 1.6             # repulsion strength (inverse-distance). UP = firmer deflect; too high = heading
+                        #       rotates past 90° → base can't drive forward → spins in place
+  skip_near_target: 0.8 # m — ignore the rack the target box sits on. keep < 1.5 (sibling-rack spacing)
+
+grasp:
+  grip_radius: 0.45     # m — magnetic grab fires within this of the box surface. UP = grabs sooner
+                        #     (applied live; helps if robot reaches the box but never latches)
+
+spawn:
+  standoff_small: 1.5   # m — base spawn distance from a small/regular box (stage 2). DOWN if it never
+  standoff_heavy: 1.1   # m — ...for a heavy (bigger) box.  reaches grasp; UP if it spawns inside a rack
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# NOT loaded from here — these need a code edit + env rebuild (set at scene/actuator build time):
+#   env/warehouse_scene.py : BASE_DRIVE_EFFORT = 2000   # UP if base can't push heavy box; DOWN = drive-through-rack bug
+#   env/warehouse_env.py   : MAX_LIN_SPEED / MAX_ANG_SPEED = 1.5 / 1.5   # base top speed
+#   env/warehouse_env.py   : GRIP_FWD / GRIP_UP = 0.6 / 0.7   # where the held box rides (fwd / up from chassis)
+#   env/warehouse_env.py   : STUCK_STEPS = 450   # idle control steps (~45 s) before the episode auto-resets

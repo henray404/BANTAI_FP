@@ -59,3 +59,25 @@ def test_target_box_categories_cycle():
     from env.layout_grid import TARGET_BOX_SPECS
     cats = [name.split("_")[0] for name, *_ in TARGET_BOX_SPECS]
     assert cats.count("fragile") == cats.count("regular") == cats.count("heavy") == 6
+
+
+def test_avoidance_points_at_target_when_clear():
+    """No island near: heading aims straight at the target (atan2 of the +x offset == 0)."""
+    from env.layout_grid import avoidance_heading
+    heading, dist = avoidance_heading((5.0, 0.0), (0.0, 0.0), [], 2.6, 1.6, 1.6)
+    assert abs(heading) < 1e-6 and abs(dist - 5.0) < 1e-6
+
+
+def test_avoidance_pushes_away_from_island():
+    """Island beside the path bends the heading AWAY from it (island at +y → heading −y)."""
+    from env.layout_grid import avoidance_heading
+    # base at origin, target ahead (+x), an island just off the left (+y) within influence.
+    heading, _ = avoidance_heading((4.0, 0.0), (0.0, 0.0), [(0.5, 1.0)], 2.6, 1.6, 1.6)
+    assert heading < 0.0, "should steer toward −y, away from the +y island"
+
+
+def test_avoidance_skips_target_island():
+    """Island coincident with the target is ignored, so heading still aims at the target."""
+    from env.layout_grid import avoidance_heading
+    heading, _ = avoidance_heading((5.0, 0.0), (0.0, 0.0), [(5.0, 0.0)], 2.6, 1.6, 1.6)
+    assert abs(heading) < 1e-6
