@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -59,6 +60,9 @@ def main() -> None:
     """Parse CLI, iterate the run schedule, launch each as a resumable subprocess."""
     ap = argparse.ArgumentParser(description="Run the 18-run ablation sequentially")
     ap.add_argument("--results", default="training/results/ablation")
+    ap.add_argument("--scenario", type=int, default=None,
+                    help="Run ONLY this one config 1..6 (for running scenarios in parallel "
+                         "across terminals). Shorthand for --only N.")
     ap.add_argument("--only", type=int, nargs="*", default=None,
                     help="Restrict to these config indices (1..6).")
     ap.add_argument("--seeds", type=int, nargs="*", default=None,
@@ -67,6 +71,9 @@ def main() -> None:
                     help="Override env steps/run (default: from --config / ablation.yaml).")
     ap.add_argument("--config", type=str, default=None,
                     help="Path to experiments/ablation.yaml; forwarded to every run.")
+    ap.add_argument("--device", type=str, default=None,
+                    help="Pin runs to a GPU, e.g. 'cuda:1' or '1' (sets CUDA_VISIBLE_DEVICES "
+                         "for each subprocess). Use a different --device per terminal.")
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--timeout", type=int, default=None, help="Per-run timeout (seconds).")
     ap.add_argument("--no-headless", action="store_true")
@@ -77,10 +84,18 @@ def main() -> None:
     seeds = args.seeds if args.seeds is not None else settings.budget["seeds"]
     steps = args.steps if args.steps is not None else settings.budget["total_steps"]
     results = Path(args.results)
-    configs = [c for c in CONFIGS if args.only is None or c.idx in args.only]
+    only = [args.scenario] if args.scenario is not None else args.only
+    configs = [c for c in CONFIGS if only is None or c.idx in only]
     schedule = [(c, s) for c in configs for s in seeds]
 
-    print(f"[run_all] {len(schedule)} runs, {steps} steps each "
+    # GPU pinning: a "cuda:K" / "K" device -> CUDA_VISIBLE_DEVICES=K for the subprocess.
+    sub_env = os.environ.copy()
+    if args.device is not None:
+        gpu = args.device.split(":")[-1]
+        sub_env["CUDA_VISIBLE_DEVICES"] = gpu
+
+    dev_note = f" on CUDA_VISIBLE_DEVICES={sub_env['CUDA_VISIBLE_DEVICES']}" if args.device else ""
+    print(f"[run_all] {len(schedule)} runs, {steps} steps each{dev_note} "
           f"-> {results}\n")
     failures = []
     for i, (cfg, seed) in enumerate(schedule, 1):
@@ -100,7 +115,7 @@ def main() -> None:
         logdir.mkdir(parents=True, exist_ok=True)
         t0 = time.time()
         try:
-            proc = subprocess.run(cmd, timeout=args.timeout)
+            proc = subprocess.run(cmd, timeout=args.timeout, env=sub_env)
             rc = proc.returncode
         except subprocess.TimeoutExpired:
             print(f"{tag}: TIMEOUT after {args.timeout}s")

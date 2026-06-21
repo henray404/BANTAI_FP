@@ -16,8 +16,12 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import json as _json
+import tempfile
+
 from experiments import analyze, configs
 from experiments.settings import load_settings
+from experiments.trajectory_recorder import TRAJ_HEADER, TrajectoryRecorder
 from env.her_nm512 import relabel_cache_episode
 
 
@@ -98,6 +102,39 @@ def test_settings_override_is_deep_merged():
     assert s.ca_slope["category_gains"] == [1.0, 1.5, 2.0]  # untouched keys survive
     assert s.budget["total_steps"] == 5000
     assert s.budget["seeds"] == [0, 1, 2]                   # untouched keys survive
+
+
+# ── TrajectoryRecorder (best-episode action trace for GUI replay) ───────────────
+
+def test_trajectory_recorder_promotes_best():
+    import csv
+    d = tempfile.mkdtemp()
+    rec = TrajectoryRecorder(d)
+
+    rec.begin({"goal_id": [1, 0, 0]})
+    rec.step(1, [0.1] * 6, [0, 0, 0], [0, 0, 0], 0.0, -1.0)
+    assert rec.end(0.0, -5.0) is True            # first non-empty episode -> saved
+
+    rec.begin({"goal_id": [1, 0, 0]})
+    rec.step(1, [0.2] * 6, [1, 1, 1], [1, 1, 1], 0.0, 0.0)
+    assert rec.end(0.0, -9.0) is False           # lower return, same success -> not saved
+
+    rec.begin({"goal_id": [0, 1, 0]})
+    rec.step(1, [0.3, 0, 0, 0, 0, 1], [2, 2, 2], [1, 1, 1], 1.0, 10.0)
+    assert rec.end(1.0, 12.0) is True            # higher success -> saved
+
+    rows = list(csv.reader((Path(d) / "best_trajectory.csv").open()))
+    assert tuple(rows[0]) == TRAJ_HEADER
+    assert len(rows) == 2                          # header + the 1 step of the best episode
+    meta = _json.loads((Path(d) / "best_init.json").read_text())
+    assert meta["success_rate"] == 1.0
+    assert meta["init"]["goal_id"] == [0, 1, 0]
+
+
+def test_trajectory_recorder_skips_empty_episode():
+    rec = TrajectoryRecorder(tempfile.mkdtemp())
+    rec.begin({})
+    assert rec.end(1.0, 100.0) is False            # no steps recorded -> nothing saved
 
 
 # CA-SLOPE is tested in tests/test_ca_slope.py (teammate's canonical reward/ca_slope.py).

@@ -91,17 +91,19 @@ def main() -> None:
 
     from stable_baselines3.common.callbacks import BaseCallback, CallbackList
     from experiments.metrics import BestModelTracker, EvalCsv, evaluate_policy
+    from experiments.trajectory_recorder import TrajectoryRecorder
 
     class EvalSuccessCallback(BaseCallback):
-        """Every eval_every steps: eval → eval_metrics.csv; save the best model."""
+        """Every eval_every steps: eval → eval_metrics.csv; save best model + action trace."""
 
         def __init__(self, eval_env, csv: EvalCsv, best: BestModelTracker,
-                     every: int, episodes: int):
-            """Hold the eval env + CSV writer + best tracker + cadence."""
+                     traj: TrajectoryRecorder, every: int, episodes: int):
+            """Hold the eval env + CSV writer + best tracker + trajectory recorder + cadence."""
             super().__init__()
             self._eval_env = eval_env
             self._csv = csv
             self._best = best
+            self._traj = traj
             self._every = every
             self._episodes = episodes
             self._next = every
@@ -111,14 +113,16 @@ def main() -> None:
             if self.num_timesteps >= self._next:
                 self._next += self._every
                 act = lambda obs: self.model.predict(obs, deterministic=True)[0]
-                metrics = evaluate_policy(self._eval_env, act, self._episodes)
+                metrics = evaluate_policy(self._eval_env, act, self._episodes,
+                                          recorder=self._traj)
                 self._csv.log(self.num_timesteps, metrics)
                 if self._best.update(self.num_timesteps, metrics):
                     self.model.save(str(self._best.dir / "best_model"))
             return True
 
+    _best = BestModelTracker(logdir)
     callbacks = [EvalSuccessCallback(
-        sb3_env, EvalCsv(logdir), BestModelTracker(logdir),
+        sb3_env, EvalCsv(logdir), _best, TrajectoryRecorder(_best.dir),
         settings.budget["eval_every"], settings.budget["eval_episodes"])]
     if args_cli.wandb:
         try:

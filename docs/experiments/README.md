@@ -94,10 +94,20 @@ Each `training/results/ablation/<logname>_seed<n>/` contains:
 | `best/best.json`   | metrics + step of the best eval so far (highest success rate, ties by return) |
 | `best/best_model*` | checkpoint at the best eval (SB3 `.zip`; DreamerV3 copy of `latest.pt`) |
 | `best/run_config.yaml` | the config that produced the best model |
+| `best/best_trajectory.csv` | best EPISODE's per-step actions + state (`step,a0..a5,robot_xyz,ee_xyz,holding,reward`) |
+| `best/best_init.json` | scene snapshot at that episode's start (robot+box poses, goal) for replay |
 | `DONE`             | resume marker written on success |
 
 **Reproduce the best run:** read `best/run_config.yaml` for the exact hyperparameters and
 re-launch with the matching `--config` / flags / seed; load `best/best_model*` for inference.
+
+**Watch the best run in the GUI:**
+```bash
+python scripts/replay_best.py --run training/results/ablation/<logname>_seed<n>
+```
+Restores `best_init.json` then replays `best_trajectory.csv` action-by-action in Isaac Lab —
+see the model's best decisions without retraining. (Snapshot restore is required because box
+poses + goal are randomized each reset.)
 
 ---
 
@@ -148,6 +158,9 @@ sizes (mean differences) alongside.
 | `experiments/metrics.py`     | shared eval loop + `eval_metrics.csv` + `run_config.yaml` + `BestModelTracker` |
 | `experiments/nm512_eval.py`  | DreamerV3 eval-env recorder → CSV + best snapshot |
 | `experiments/analyze.py`     | aggregate + Mann–Whitney U → `summary.md` |
+| `experiments/trajectory_recorder.py` | record best episode's actions → `best_trajectory.csv` + `best_init.json` |
+| `env/scene_snapshot.py`      | capture/restore full scene state for faithful replay |
+| `scripts/replay_best.py`     | replay the best episode in the Isaac Lab GUI |
 | `reward/ca_slope.py`         | `CASlopeShaper` — category-aware PBRS potential (numpy+torch) |
 | `reward/ca_slope_wrapper.py` | `CASlopeEnvWrapper` (mode = category/generic/none) |
 | `env/her_nm512.py`           | Visual HER relabel + monkeypatch for the NM512 loop |

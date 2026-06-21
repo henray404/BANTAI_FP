@@ -57,6 +57,7 @@ from reward.ca_slope import CASlopeShaper  # noqa: E402
 from reward.ca_slope_wrapper import CASlopeEnvWrapper  # noqa: E402
 from experiments.metrics import BestModelTracker, EvalCsv, write_run_config  # noqa: E402
 from experiments.settings import load_settings  # noqa: E402
+from experiments.trajectory_recorder import TrajectoryRecorder  # noqa: E402
 from models.dreamerv3.config import add_vendor_to_path, build_config  # noqa: E402
 from models.dreamerv3.warehouse_dreamer_env import make_warehouse_dreamer  # noqa: E402
 
@@ -67,7 +68,7 @@ _SETTINGS = load_settings(args_cli.config)
 # One shared env (single Isaac sim). `gym` is the gym env (maybe CA-SLOPE-wrapped);
 # `success` is the raw WarehouseGymEnv used for success readout in eval.
 _SHARED_ENV = {"gym": None, "success": None}
-_EVAL = {"csv": None, "best": None}  # set in main(); eval envs log + snapshot best.
+_EVAL = {"csv": None, "best": None, "traj": None}  # set in main(); eval logs + best + trace.
 
 
 def _build_shared_env():
@@ -114,6 +115,7 @@ def main() -> None:
         "config_file": args_cli.config, "settings": vars(_SETTINGS),
     })
     _EVAL["best"] = BestModelTracker(args_cli.logdir)
+    _EVAL["traj"] = TrajectoryRecorder(_EVAL["best"].dir)  # best-episode action trace
 
     b, dm = _SETTINGS.budget, _SETTINGS.dreamer
     config = build_config(
@@ -135,6 +137,7 @@ def main() -> None:
                 eval_episodes=cfg.eval_episode_num, eval_every=cfg.eval_every,
                 best=_EVAL["best"],
                 checkpoint_src=Path(args_cli.logdir) / "latest.pt",
+                traj=_EVAL["traj"],
             )
         return env
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from experiments.metrics import BestModelTracker, EvalCsv, episode_success
+from experiments.metrics import BestModelTracker, EvalCsv, _rl_env, episode_success
 
 
 class EvalRecorder:
@@ -34,13 +34,15 @@ class EvalRecorder:
 
     def __init__(self, nm512_env, warehouse_env, csv: EvalCsv,
                  eval_episodes: int = 5, eval_every: int = 10_000,
-                 best: BestModelTracker | None = None, checkpoint_src=None):
+                 best: BestModelTracker | None = None, checkpoint_src=None,
+                 traj=None):
         """Hold the wrapped env + CSV writer and reset counters."""
         self._env = nm512_env
         self._warehouse = warehouse_env
         self._csv = csv
         self._best = best
         self._checkpoint_src = checkpoint_src
+        self._traj = traj  # TrajectoryRecorder for the best-episode action trace (or None)
         self._eval_episodes = int(eval_episodes)
         self._eval_every = int(eval_every)
         self._succ: list[float] = []
@@ -55,20 +57,32 @@ class EvalRecorder:
         return getattr(self._env, name)
 
     def reset(self, *args, **kwargs):
-        """Reset the wrapped env and the per-episode accumulators."""
+        """Reset the wrapped env, the per-episode accumulators, and the trajectory buffer."""
         self._ep_len = 0
         self._ep_ret = 0.0
-        return self._env.reset(*args, **kwargs)
+        out = self._env.reset(*args, **kwargs)
+        if self._traj is not None:
+            from env.scene_snapshot import capture_init_state
+            self._traj.begin(capture_init_state(_rl_env(self._warehouse)))
+        return out
 
     def step(self, action):
-        """Step the wrapped env; on episode end record success and maybe flush a row."""
+        """Step the wrapped env; record the action trace; on done flush + save best."""
         obs, reward, done, info = self._env.step(action)
         self._ep_len += 1
         self._ep_ret += float(reward)
+        if self._traj is not None:
+            from env.scene_snapshot import read_replay_state
+            a = action["action"] if isinstance(action, dict) else action
+            robot_xyz, ee_xyz, holding = read_replay_state(_rl_env(self._warehouse))
+            self._traj.step(self._ep_len, a, robot_xyz, ee_xyz, holding, float(reward))
         if done:
-            self._succ.append(1.0 if episode_success(self._warehouse) else 0.0)
+            succ = 1.0 if episode_success(self._warehouse) else 0.0
+            self._succ.append(succ)
             self._lens.append(self._ep_len)
             self._rets.append(self._ep_ret)
+            if self._traj is not None:
+                self._traj.end(succ, self._ep_ret)
             self._ep_len = 0
             self._ep_ret = 0.0
             if len(self._succ) >= self._eval_episodes:

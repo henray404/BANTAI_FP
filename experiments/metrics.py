@@ -44,34 +44,47 @@ def episode_success(env) -> bool:
 
 
 def evaluate_policy(env, act_fn: Callable[[dict], np.ndarray],
-                    episodes: int = 5) -> dict[str, float]:
+                    episodes: int = 5, recorder=None) -> dict[str, float]:
     """Run `episodes` deterministic eval episodes; return success/length/return means.
 
     Args:
-        env:     Warehouse gym env (num_envs=1), optionally wrapped.
-        act_fn:  Maps an obs dict to a (6,) numpy action (use the greedy/mean policy).
+        env:      Warehouse gym env (num_envs=1), optionally wrapped.
+        act_fn:   Maps an obs dict to a (6,) numpy action (use the greedy/mean policy).
         episodes: Number of eval episodes.
+        recorder: Optional TrajectoryRecorder — saves the best episode's action trace
+                  + scene snapshot for GUI replay.
 
     Returns:
-        {"success_rate": ..., "mean_length": ..., "mean_return": ...}
+        {"success_rate": ..., "success_std": ..., "mean_length": ..., "mean_return": ...}
     """
     successes, lengths, returns = [], [], []
     for _ in range(episodes):
         obs, _ = env.reset()
+        if recorder is not None:
+            from env.scene_snapshot import capture_init_state
+            recorder.begin(capture_init_state(_rl_env(env)))
         done, ep_len, ep_ret = False, 0, 0.0
         while not done:
             action = act_fn(obs)
             obs, reward, terminated, truncated, _ = env.step(action)
-            ep_ret += float(np.asarray(_to_np(reward)).reshape(-1)[0])
+            r = float(np.asarray(_to_np(reward)).reshape(-1)[0])
+            ep_ret += r
             ep_len += 1
+            if recorder is not None:
+                from env.scene_snapshot import read_replay_state
+                robot_xyz, ee_xyz, holding = read_replay_state(_rl_env(env))
+                recorder.step(ep_len, action, robot_xyz, ee_xyz, holding, r)
             term = bool(np.asarray(_to_np(terminated)).reshape(-1)[0])
             trunc = bool(np.asarray(_to_np(truncated)).reshape(-1)[0])
             done = term or trunc
             if term:
                 break
-        successes.append(1.0 if episode_success(env) else 0.0)
+        succ = 1.0 if episode_success(env) else 0.0
+        successes.append(succ)
         lengths.append(ep_len)
         returns.append(ep_ret)
+        if recorder is not None:
+            recorder.end(succ, ep_ret)
     return {
         "success_rate": float(np.mean(successes)),
         "success_std": float(np.std(successes)),

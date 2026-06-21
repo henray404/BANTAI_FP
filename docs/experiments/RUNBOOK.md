@@ -105,6 +105,32 @@ python -m experiments.run_all --seeds 0 1         # fewer seeds
 
 ---
 
+## 4b. Parallel across GPUs / terminals (faster than sequential)
+
+`run_all` is sequential PER invocation, but each (scenario, seed) writes its own logdir +
+`DONE`, so multiple invocations don't collide. To run scenarios **at the same time**, open
+one terminal per scenario and pin each to a GPU with `--scenario N --device cuda:K`:
+
+```bash
+# terminal 1  (GPU 0)
+python -m experiments.run_all --scenario 1 --device cuda:0 --config experiments/ablation.yaml
+# terminal 2  (GPU 1)
+python -m experiments.run_all --scenario 2 --device cuda:1 --config experiments/ablation.yaml
+# terminal 3  (GPU 0)  ... etc.
+python -m experiments.run_all --scenario 3 --device cuda:0 --config experiments/ablation.yaml
+```
+- `--scenario N` = run only config N (its 3 seeds, sequentially in that terminal).
+- `--device cuda:K` (or `--device K`) sets `CUDA_VISIBLE_DEVICES=K` for that terminal's runs.
+- Split a scenario's seeds across terminals too:
+  `--scenario 3 --seeds 0 --device cuda:0` + `--scenario 3 --seeds 1 --device cuda:1`.
+
+**VRAM budget:** one env + active arm IK ≈ 8 GB. On 2×2080Ti (22 GB) ~2–3 runs fit at once —
+do NOT launch all 6 on one GPU or you OOM. Match concurrency to GPU count/VRAM.
+`watch -n5 nvidia-smi` to watch it. The final `analyze` step is identical regardless of how
+the runs were scheduled — it reads every `eval_metrics.csv` under `--results`.
+
+---
+
 ## 5. Monitor while it runs
 
 - **Live CSV:** `tail -f training/results/ablation/c6_dreamer_full_seed0/eval_metrics.csv`
@@ -148,12 +174,32 @@ comparisons (#6vs#4, #6vs#5, #4/#5vs#3, #3vs#1/#2).
 Each run's best checkpoint + the exact config that made it are saved:
 ```
 training/results/ablation/<run>/best/
-  best.json          # step + metrics
-  best_model.zip|pt  # checkpoint (SB3 .zip / DreamerV3 latest.pt copy)
-  run_config.yaml    # the exact settings + flags
+  best.json             # step + metrics of the best eval
+  best_model.zip|pt     # checkpoint (SB3 .zip / DreamerV3 latest.pt copy)
+  run_config.yaml       # the exact settings + flags
+  best_trajectory.csv   # the best EPISODE's per-step actions + state (for GUI replay)
+  best_init.json        # scene snapshot at that episode's start (robot+box poses, goal)
 ```
 Read `run_config.yaml`, relaunch with the matching `--config`/seed/flags, and load
 `best_model*` for inference.
+
+---
+
+## 9. Watch the best run in the GUI (replay)
+
+To SEE the best episode play out in Isaac Lab — no retraining, no agent reload — replay the
+recorded actions. `replay_best.py` restores the exact starting scene from `best_init.json`,
+then applies the actions from `best_trajectory.csv` step by step:
+
+```bash
+python scripts/replay_best.py --run training/results/ablation/c6_dreamer_full_seed0
+```
+- GUI window opens by default; add `--headless` for a no-window sanity check.
+- It prints the recorded success/return, then `delivered=True/False` at the end.
+- **Faithful replay needs the scene snapshot** (boxes/goal are randomized each reset) — that's
+  why `best_init.json` is restored first. Action-only replay would land on a different scene.
+
+> UNVERIFIED on hardware (Blackwell). Verify on the Linux box.
 
 ---
 
@@ -167,4 +213,7 @@ python -m experiments.run_all --dry-run --config experiments/ablation.yaml   # 2
 python -m experiments.run_all --only 3 --seeds 0 --steps 5000 --config experiments/ablation.yaml  # 3. smoke
 python -m experiments.run_all --config experiments/ablation.yaml             # 4. full 18
 python -m experiments.analyze --results training/results/ablation            # 7. report
+python scripts/replay_best.py --run training/results/ablation/c6_dreamer_full_seed0  # 9. watch best in GUI
 ```
+
+Parallel (per terminal): `python -m experiments.run_all --scenario N --device cuda:K --config experiments/ablation.yaml`
