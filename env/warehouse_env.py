@@ -624,19 +624,15 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
                     UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Set(enabled)
 
     def _grip_anchor_world(self) -> torch.Tensor:
-        """World-frame carry point (N,3): in front of + above the chassis, where a held box rides."""
+        """World-frame carry point (N,3) = the panda_hand (grabber) position.
+
+        The held box is snapped here and welded to the chassis, so it sits AT the gripper (not a
+        floating offset in front of the base). Arm is frozen, so the hand→base offset is constant →
+        the box rides with the robot at the grabber. (GRIP_FWD/GRIP_UP kept for the kinematic mode.)
+        """
         robot: Articulation = self.scene["robot"]
-        base = robot.body_names.index("base_link")
-        base_w = robot.data.body_pos_w[:, base].clone()         # (N,3)
-        quat = robot.data.body_quat_w[:, base]                  # (w,x,y,z)
-        yaw = torch.atan2(
-            2.0 * (quat[:, 0] * quat[:, 3] + quat[:, 1] * quat[:, 2]),
-            1.0 - 2.0 * (quat[:, 2] ** 2 + quat[:, 3] ** 2),
-        )
-        base_w[:, 0] += GRIP_FWD * torch.cos(yaw)
-        base_w[:, 1] += GRIP_FWD * torch.sin(yaw)
-        base_w[:, 2] += GRIP_UP
-        return base_w
+        hand = robot.body_names.index("panda_hand")
+        return robot.data.body_pos_w[:, hand].clone()           # (N,3) hand/grabber world pos
 
     def _hand_path(self, e: int) -> str | None:
         """Resolved panda_hand LINK prim path for env e (cached; traverses Robot subtree once)."""
