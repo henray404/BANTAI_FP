@@ -80,6 +80,12 @@ CARRY_MODE = "kinematic"
 GRIP_FWD = 0.6   # metres in front of the chassis (body +x)
 GRIP_UP  = 0.7   # metres above the chassis origin
 
+# Idle/stuck reset: end the episode if the base hasn't translated more than STUCK_MOVE_EPS_M per
+# control step for STUCK_STEPS consecutive steps (~45 s at 10 Hz control) — frees a robot wedged
+# against a wall/rack instead of wasting the full 100 s episode standing still.
+STUCK_MOVE_EPS_M = 0.02
+STUCK_STEPS = 450
+
 
 # ── Custom Observation Functions ──────────────────────────────────────
 def camera_rgb(env: ManagerBasedRLEnv, sensor_name: str = "camera") -> torch.Tensor:
@@ -161,6 +167,13 @@ def box_position(env: ManagerBasedRLEnv) -> torch.Tensor:
     if hasattr(env, "box_pos"):
         return env.box_pos
     return torch.zeros(env.num_envs, 3, device=env.device)
+
+
+def stuck_timeout(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """(num_envs,) bool: base idle (no translation) for >= STUCK_STEPS steps. Reads env._stuck_steps."""
+    if hasattr(env, "_stuck_steps"):
+        return env._stuck_steps >= STUCK_STEPS
+    return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
 
 def robot_heading(
@@ -306,6 +319,7 @@ class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     success  = DoneTerm(func=pickup_delivered)   # held box inside its commanded color zone
     bounds   = DoneTerm(func=out_of_bounds, params={"half_extent_x": 9.5, "half_extent_y": 14.5})
+    stuck    = DoneTerm(func=stuck_timeout)      # base idle ~45 s → reset (wedged in a wall/rack)
 
 
 # ── Env Cfg ───────────────────────────────────────────────────────────
@@ -371,6 +385,9 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         self.holding = torch.zeros(N, dtype=torch.bool, device=dev)
         self.grasp_event = torch.zeros(N, dtype=torch.bool, device=dev)
         self.drop_event = torch.zeros(N, dtype=torch.bool, device=dev)
+        # Idle/stuck detector (see stuck_timeout termination): consecutive idle steps + prev base xy.
+        self._stuck_steps = torch.zeros(N, device=dev)
+        self._prev_base_xy = torch.zeros(N, 2, device=dev)
         # Curriculum 4-stage manager (env.curriculum). Default STAGE_FULL = legacy full chain.
         # P3/P5 drive transitions via set_stage()/set_goal_alpha(); P4 provides the mechanism only.
         from env.curriculum import STAGE_FULL
@@ -477,6 +494,11 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         self._randomize_box_poses(env_ids_t)  # after super() so scene.reset() doesn't undo it
         self._refresh_target_box_pos(env_ids_t)
         self._apply_stage_reset(env_ids_t)     # stage-2 spawn-near-box / stage-1 pre-grasp
+        # Reset the idle/stuck detector for these envs (prev xy = the new spawn pose).
+        self._stuck_steps[env_ids_t] = 0.0
+        _robot = self.scene["robot"]
+        _bidx = _robot.body_names.index("base_link")
+        self._prev_base_xy[env_ids_t] = _robot.data.body_pos_w[env_ids_t, _bidx, :2]
 
     def _refresh_target_box_pos(self, env_ids: torch.Tensor | None = None) -> None:
         """Write each env's commanded box xyz (env-local) into self.box_pos."""
@@ -533,6 +555,18 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
             self._set_box_visibility(dropped, visible=True)
             self._set_box_collision(dropped, enabled=True)
             self._carry_held_boxes(anchor)
+
+    def _update_stuck(self) -> None:
+        """Count consecutive idle (no-translation) control steps for the stuck_timeout termination."""
+        robot: Articulation = self.scene["robot"]
+        bidx = robot.body_names.index("base_link")
+        xy = robot.data.body_pos_w[:, bidx, :2]
+        moved = torch.norm(xy - self._prev_base_xy, dim=-1)
+        self._prev_base_xy = xy.clone()
+        idle = moved < STUCK_MOVE_EPS_M
+        self._stuck_steps = torch.where(
+            idle, self._stuck_steps + 1.0, torch.zeros_like(self._stuck_steps)
+        )
 
     def _box_in_any_zone(self) -> torch.Tensor:
         """(N,) bool: target box xy within 1.5 m of its commanded zone center (env-local)."""
@@ -821,6 +855,7 @@ class WarehouseGymEnv(gym.Env):
         internal = torch.cat([base3, ee3, grip1], dim=-1)   # (N,7) base(3)+ik(3)+gripper(1)
         obs, reward, terminated, truncated, info = self._env.step(internal)
         self._env.update_grasp()                            # holding + grasp/drop events, carry box
+        self._env._update_stuck()                           # idle detector for stuck_timeout reset
         return self._unwrap_obs(obs), reward, terminated, truncated, info
 
     def render(self):
