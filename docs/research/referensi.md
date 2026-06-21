@@ -159,6 +159,26 @@ Semua URL diverifikasi loads. Asset Ridgeback-Franka di-fetch ulang manual — p
 
 ---
 
+## F2. Peta Konfigurasi Eksperimen → Paper (ablasi 2×2 + baseline)
+
+Ditambahkan 2026-06-21 untuk skenario pengujian 6-konfigurasi (lihat
+`docs/experiments/README.md` + `experiments/configs.py`). Kunci paper di kolom kanan
+memetakan ke entri bernomor di atas.
+
+| # | Konfigurasi | Mengisolasi | Paper kunci |
+|---|-------------|-------------|-------------|
+| 1 | SAC (model-free) | lantai model-free off-policy | #18, SB3 |
+| 2 | PPO (model-free) | lantai model-free on-policy | #19, SB3 |
+| 3 | DreamerV3 vanilla | efek world model murni (vs #1,#2) | #1, #4, NM512 |
+| 4 | DreamerV3 + CA-SLOPE | kontribusi CA-SLOPE (vs #3) | #1, #15, #16 |
+| 5 | DreamerV3 + Visual HER | kontribusi Visual HER (vs #3) | #1, #11, #12, #13 |
+| 6 | DreamerV3 + CA-SLOPE + Visual HER | gabungan; #6vs#4=HER murni, #6vs#5=CA-SLOPE murni | #1, #15, #11, #13 |
+
+Uji signifikansi antar-konfigurasi: **Mann-Whitney U** (n=3 seed per konfigurasi terlalu
+kecil untuk asumsi normalitas uji-t). Detail hyperparameter: `docs/experiments/hyperparameters.md`.
+
+---
+
 ## G. Arsitektur Pipeline (pure-DL, tanpa CLIP/teks)
 
 ```

@@ -53,34 +53,33 @@ class SB3WarehouseEnv(gym.Env):
             "SB3 drives a single env; use VecEnv stacking at the SB3 layer instead."
         )
         self._env = warehouse_env
-        self.action_space = spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+        # obs_v2 + pickup action contract (6,): [base_lin, base_ang, ee_dx, ee_dy, ee_dz, gripper]
+        self.action_space = spaces.Box(-1.0, 1.0, shape=(6,), dtype=np.float32)
 
         IMG = 64
-        EMB = 512
-        self.observation_space = spaces.Dict(
-            {
-                # uint8 image → SB3 treats it as a CNN input and auto-normalizes.
-                "pixels":   spaces.Box(0, 255, shape=(3, IMG, IMG), dtype=np.uint8),
-                "position": spaces.Box(-np.inf, np.inf, shape=(3,), dtype=np.float32),
-                "goal":     spaces.Box(-np.inf, np.inf, shape=(3,), dtype=np.float32),
-                "goal_emb": spaces.Box(-np.inf, np.inf, shape=(EMB,), dtype=np.float32),
-                "heading":  spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32),
-            }
-        )
+        # obs_v2 (pickup, 2026-06-08): pixels + 8 low-dim keys. goal_emb removed → goal_id one-hot.
+        self._vec_keys = {
+            "position": 3, "heading": 2, "goal": 3, "goal_id": 3,
+            "ee_pos": 3, "gripper": 1, "holding": 1, "box_pos": 3,
+        }
+        spaces_d = {
+            k: spaces.Box(-np.inf, np.inf, shape=(d,), dtype=np.float32)
+            for k, d in self._vec_keys.items()
+        }
+        # uint8 image → SB3 treats it as a CNN input and auto-normalizes.
+        spaces_d["pixels"] = spaces.Box(0, 255, shape=(3, IMG, IMG), dtype=np.uint8)
+        self.observation_space = spaces.Dict(spaces_d)
 
     def _convert(self, obs: dict) -> dict:
-        """Squeeze batch, cast pixels → uint8, others → float32."""
+        """Squeeze batch, cast pixels → uint8, low-dim keys → float32 (obs_v2)."""
         px = _np(obs["pixels"])
         if px.dtype != np.uint8:
             px = np.clip(px, 0.0, 1.0) * 255.0
             px = px.astype(np.uint8)
-        return {
-            "pixels":   px,
-            "position": _np(obs["position"]).astype(np.float32),
-            "goal":     _np(obs["goal"]).astype(np.float32),
-            "goal_emb": _np(obs["goal_emb"]).astype(np.float32),
-            "heading":  _np(obs["heading"]).astype(np.float32),
-        }
+        out = {"pixels": px}
+        for k in self._vec_keys:
+            out[k] = _np(obs[k]).astype(np.float32).reshape(-1)
+        return out
 
     def reset(self, *, seed: int | None = None, options=None):
         """Reset underlying env; return (obs, info)."""
@@ -90,7 +89,7 @@ class SB3WarehouseEnv(gym.Env):
 
     def step(self, action):
         """Apply action; return (obs, reward, terminated, truncated, info)."""
-        action = np.asarray(action, dtype=np.float32).reshape(2)
+        action = np.asarray(action, dtype=np.float32).reshape(6)
         obs, reward, terminated, truncated, info = self._env.step(action)
         r = float(_np(reward).reshape(-1)[0])
         term = bool(_np(terminated).reshape(-1)[0])

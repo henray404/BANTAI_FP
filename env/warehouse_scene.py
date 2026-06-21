@@ -142,6 +142,11 @@ def _spawn_ridgeback_welded(prim_path, cfg, translation=None, orientation=None):
     return prim
 
 
+# Max force (N) the holonomic base velocity drive may apply. Bounded so a static rack
+# contact constraint wins over the drive (the shipped 1e5 bulldozed through racks). Tune
+# on the sim. See bugs_errors/2026-06-21_base-clips-through-racks.md.
+BASE_DRIVE_EFFORT = 2000.0
+
 RIDGEBACK_FRANKA_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=f"{ISAAC_NUCLEUS_DIR}/Robots/Clearpath/RidgebackFranka/ridgeback_franka.usd",
@@ -177,11 +182,18 @@ RIDGEBACK_FRANKA_CFG = ArticulationCfg(
         joint_vel={".*": 0.0},
     ),
     actuators={
+        # base holonomic velocity drive. effort_limit_sim caps the force the drive can apply
+        # to hit the commanded velocity. The shipped 100000 N is so strong it BULLDOZES through
+        # static rack colliders (the drive overpowers the contact constraint before the solver
+        # depenetrates) -> "robot tembus rak". Capped to BASE_DRIVE_EFFORT so a rack contact wins
+        # while the base still drives freely. damping lowered to match the smaller effort budget.
+        # TUNE ON SIM (Blackwell-blocked): raise if the base feels sluggish, lower if it still
+        # clips racks. See bugs_errors/2026-06-21_base-clips-through-racks.md.
         "base": ImplicitActuatorCfg(
             joint_names_expr=["dummy_base_.*"],
-            effort_limit_sim=100000.0,
+            effort_limit_sim=BASE_DRIVE_EFFORT,
             stiffness=0.0,
-            damping=1e5,
+            damping=1e4,
         ),
         "panda_shoulder": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[1-4]"],

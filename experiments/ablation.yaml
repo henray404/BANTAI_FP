@@ -1,0 +1,56 @@
+# experiments/ablation.yaml — EDIT THIS to tune the ablation study.
+#
+# Loaded by experiments/settings.py over baked-in defaults: any key you delete here just
+# falls back to the default. Pass to a run with `--config experiments/ablation.yaml`
+# (run_all.py forwards it to every subprocess). The structural matrix (which 6 configs
+# exist, the isolation comparisons) lives in experiments/configs.py — this file is only
+# the numbers you twiddle.
+
+# ── Training budget (all 6 configs) ───────────────────────────────────────────
+budget:
+  total_steps: 200000     # env steps per run (spec)
+  seeds: [0, 1, 2]        # 3 seeds -> 18 runs total
+  eval_every: 10000       # env steps between success-rate evals
+  eval_episodes: 5        # episodes averaged per eval
+
+# ── CA-SLOPE (configs #4, #6) ─────────────────────────────────────────────────
+# mode: category = per-category gains (the RQ2 method) | generic = single gain (control)
+#       | none = no shaping. category_gains order = [fragile, regular, heavy].
+ca_slope:
+  mode: category
+  gamma: 0.997            # match the agent discount (PBRS invariance exact only here)
+  category_gains: [1.0, 1.5, 2.0]
+  generic_gain: 1.5
+  phase_b_offset: 13.0    # keeps the potential continuous across the grasp
+
+# ── Visual HER (configs #5, #6) ───────────────────────────────────────────────
+visual_her:
+  her_ratio: 0.5          # fraction of grasped episodes additionally relabeled
+  success_reward: 10.0    # reward on the relabeled terminal step
+
+# ── DreamerV3 (configs #3-6) ──────────────────────────────────────────────────
+# Mostly the vendored paper defaults; train_ratio is the main wall-clock knob (512 =
+# sample-efficiency default; lower it to trade sample-efficiency for speed, but keep it
+# identical across #3-6 or the ablation comparison breaks).
+dreamer:
+  train_ratio: 512
+  prefill: 2000
+
+# ── Baselines ─────────────────────────────────────────────────────────────────
+sac:
+  learning_rate: 0.0003
+  buffer_size: 200000
+  learning_starts: 5000
+  batch_size: 256
+  tau: 0.005
+  gamma: 0.99
+
+ppo:
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 256
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.0

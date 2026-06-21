@@ -11,8 +11,15 @@
 # STATUS: skeleton + potential-based shaping interface. Quantile reward head (QCE)
 # is left as a TODO for the full SLOPE; the generic potential below is the
 # "SLOPE generic first" milestone.
+#
+# CANONICAL CA-SLOPE (2026-06-21): the pure-DL category-aware reward used by the ablation
+# (configs #4/#6) lives in `reward/ca_slope.py` (CASlopeShaper) + `reward/ca_slope_wrapper.py`
+# (CASlopeEnvWrapper) — adopted from a teammate's branch; it has per-category gains, a
+# backend-agnostic (numpy+torch) potential, and proper PBRS terminal handling. The
+# detector-based `potential()` below is the OLD vision framing and is NOT used by the
+# pure-DL experiments. Prefer `reward/ca_slope.py`.
 
-"""Category-Aware SLOPE potential-based reward shaping (skeleton)."""
+"""Category-Aware SLOPE potential-based reward shaping (legacy vision skeleton)."""
 
 from __future__ import annotations
 
