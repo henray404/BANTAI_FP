@@ -94,6 +94,23 @@ def collision_penalty(
     return -(net_force > threshold_n).float()
 
 
+def idle_penalty(
+    env: ManagerBasedRLEnv,
+    idle_steps: int = 50,
+) -> torch.Tensor:
+    """Returns -1.0 for envs idle (no base translation) for >= idle_steps consecutive steps, else 0.
+
+    Reads env._stuck_steps (the idle counter maintained by WarehouseRLEnv._update_stuck). Use with
+    a positive weight (e.g. 0.02 → -0.02/step) to make FREEZING strictly more expensive than careful
+    movement — breaks the "diam aja to dodge the collision penalty" trap. Fires far earlier than the
+    stuck_timeout reset (idle_steps=50 ≈ 5s vs STUCK_STEPS=450 ≈ 45s) so the policy feels the cost of
+    standing still long before the episode is aborted.
+    """
+    if hasattr(env, "_stuck_steps"):
+        return -(env._stuck_steps >= idle_steps).float()
+    return torch.zeros(env.num_envs, device=env.device)
+
+
 def out_of_bounds(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),

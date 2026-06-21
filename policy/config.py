@@ -30,7 +30,9 @@ class P3Config:
     # ── Actor ───────────────────────────────────────────────────────────
     actor_hidden: list[int] = field(default_factory=lambda: [512, 256])
     actor_lr: float = 3e-5
-    actor_entropy_scale: float = 3e-4
+    # Raised 3e-4 → 1e-3 (2026-06-21): higher entropy early so the policy TRIES routes around the
+    # racks (obstacle avoidance emerges from exploration) instead of collapsing to "stand still".
+    actor_entropy_scale: float = 1e-3
     actor_grad_clip: float = 100.0
     actor_min_std: float = 0.1
     actor_max_std: float = 1.0
@@ -53,6 +55,17 @@ class P3Config:
     batch_size: int = 16
     batch_seq_len: int = 64     # RSSM sequence length per batch
     buffer_capacity: int = 100_000
+
+    # ── Curriculum (P4 mechanism in env; P3 owns the transition policy) ──
+    # Start at Stage 1 (Nav-only, box PRE-GRASPED): learn NAV + rack-avoidance with dense signal
+    # before grasp is in the loop. Auto-advances 1→2→3 once a sliding window of recent episodes
+    # hits curriculum_success_threshold; Stage 4 anneals the goal-leak over goal_anneal_steps.
+    curriculum_enabled: bool = True
+    curriculum_start_stage: int = 1
+    curriculum_window: int = 20            # episodes in the sliding success-rate window
+    curriculum_success_threshold: float = 0.6   # frac of window that must succeed to advance a stage
+    curriculum_success_reward: float = 5.0      # ep_reward above this counts the episode a success
+    goal_anneal_steps: float = 50_000      # Stage-4 goal-leak decays to 0 over this many env steps
 
     # ── HER ─────────────────────────────────────────────────────────────
     her_enabled: bool = True

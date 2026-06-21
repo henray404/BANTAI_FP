@@ -1,7 +1,7 @@
 # Progress P4 — Manipulation (pickup → carry → sort)
 
 **Owner:** P4 (pairs w/ P1)
-**Last updated:** 2026-06-20
+**Last updated:** 2026-06-21
 **Status source:** dibangun + diverify sebagian di Isaac Sim (lihat catatan sim-verify)
 
 Ringkasan apa yang **udah kelar** dan **apa yang kurang**, dipecah per bagian biar gampang dikerjain.
@@ -15,6 +15,26 @@ Ringkasan apa yang **udah kelar** dan **apa yang kurang**, dipecah per bagian bi
 - **Grasp world-frame fix** — dulu bandingin EE base-frame vs box env-local (salah frame, gak nyala); sekarang konsisten world.
 - **Demo script** — `scripts/demo_pickup.py` scripted base controller (drive→stop→grab→carry).
 - **Tuning harness** — `scripts/tune_arm.py` (catatan: model lama, lihat A4).
+
+---
+
+## 🧊 Anti-freeze tuning (2026-06-21) — lawan robot "diam aja"
+
+Keluhan: robot **freeze** (diam) buat ngehindarin collision penalty, bukannya navigate ngitarin rak.
+6 perubahan, semua ke-wire:
+
+| # | Perubahan | File | Nilai |
+|---|---|---|---|
+| 1 | **Curriculum mulai Stage 1** (nav-only, box pre-grasped) — belajar NAV + hindar rak dulu, grasp belakangan. Naik stage otomatis pas success-rate ≥ threshold | `policy/config.py` (`curriculum_start_stage=1`, window/threshold eksplisit), `policy/train_loop.py` (udah ke-wire) | start=1, window=20, thresh=0.6 |
+| 2 | **Idle penalty** — diam ≥50 step (~5s) kena `-0.02`/step → diam LEBIH mahal dari gerak hati-hati | `env/warehouse_reward.py` (`idle_penalty`), `env/warehouse_env.py` (`RewardsCfg.idle`, `IDLE_PENALTY_STEPS=50`) | `-0.02`/step |
+| 3 | **Collision diturunin** `-5 → -2` — biar robot berani eksplor (nabrak dikit pas belajar gpp) | `env/warehouse_env.py` (`collision` weight 5→2) | `-2`/step kontak |
+| 4 | **Entropy dinaikin** `3e-4 → 1e-3` — robot coba muter obstacle, bukan diam | `policy/config.py` (`actor_entropy_scale`) | `1e-3` |
+| 5 | **Training lama** 50k–200k step — obstacle avoidance muncul pelan via imagination rollout | `scripts/train_p3.py` (`--steps` default `200_000`) | default 200k |
+| 6 | **Approach/carry pull DOUBLED** `-0.01 → -0.02` — dense draw ke goal ngalahin rasa takut collision | `env/warehouse_env.py` (`approach`/`carry` weight) | `-0.02`*dist |
+
+**Trade-off** (diingetin user): collision kegedean = freeze, kekecilan = nabrak terus. `-2` titik tengah awal — naikin lagi kalau robot mulai nge-ram rak terus pas udah bisa navigate.
+
+**Verify di sim** (belum di-run, butuh AppLauncher): `python scripts/train_p3.py --headless --steps 50000` → cek W&B `ep/reward` naik, `curriculum/stage` naik 1→2→3, robot gak diam di depan rak. Unit test pure-tensor: `14 passed` (`tests/test_curriculum.py`, `tests/test_reward_pickup.py`).
 
 ---
 

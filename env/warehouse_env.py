@@ -48,6 +48,7 @@ from isaaclab.utils import configclass
 from env.warehouse_scene import ITEM_SPECS, SHELF_DECK_SIZE, ZONE_SPECS, WarehouseSceneCfg
 from env.warehouse_reward import (
     collision_penalty,
+    idle_penalty,
     out_of_bounds,
     time_penalty,
 )
@@ -85,6 +86,11 @@ GRIP_UP  = 0.7   # metres above the chassis origin
 # against a wall/rack instead of wasting the full 100 s episode standing still.
 STUCK_MOVE_EPS_M = 0.02
 STUCK_STEPS = 450
+
+# Idle penalty (freeze-trap breaker): once the base has been idle for IDLE_PENALTY_STEPS consecutive
+# control steps (~5 s at 10 Hz), apply a per-step cost so STANDING STILL is strictly more expensive
+# than careful movement. Fires long before STUCK_STEPS (the hard reset). See warehouse_reward.idle_penalty.
+IDLE_PENALTY_STEPS = 50
 
 
 # ── Custom Observation Functions ──────────────────────────────────────
@@ -297,17 +303,23 @@ class EventCfg:
 class RewardsCfg:
     """Staged pick-place reward (see spec §4). Phase switches on env.holding.
 
-    Phase A (NOT holding): approach dense -0.01*dist(ee,box); grasp +5 one-shot.
-    Phase B (holding):     carry dense -0.01*dist(box,zone);  deliver +10 while in zone.
-    Always-on:             time -0.005; collision -5; drop -2 one-shot.
+    Phase A (NOT holding): approach dense -0.02*dist(ee,box); grasp +5 one-shot.
+    Phase B (holding):     carry dense -0.02*dist(box,zone);  deliver +10 while in zone.
+    Always-on:             time -0.005; collision -2; idle -0.02; drop -2 one-shot.
+
+    Anti-freeze tuning (2026-06-21): approach/carry pull DOUBLED (-0.01→-0.02) so the dense draw to
+    the goal out-weighs the collision fear; collision HALVED (-5→-2) so the robot dares to explore
+    around the racks instead of freezing; idle -0.02/step makes standing still strictly worse than
+    careful movement. See docs/progress_p4.md.
     """
 
-    approach  = RewTerm(func=approach_box_distance,   weight=-0.01)
+    approach  = RewTerm(func=approach_box_distance,   weight=-0.02)
     grasp     = RewTerm(func=grasp_success_reward,    weight=5.0)
-    carry     = RewTerm(func=carry_distance,          weight=-0.01)
+    carry     = RewTerm(func=carry_distance,          weight=-0.02)
     deliver   = RewTerm(func=pickup_delivered_reward, weight=10.0)
     time_pen  = RewTerm(func=time_penalty,            weight=-0.005)
-    collision = RewTerm(func=collision_penalty,       weight=5.0)   # func returns 0/-1; weight=5 → -5
+    collision = RewTerm(func=collision_penalty,       weight=2.0)   # func returns 0/-1; weight=2 → -2
+    idle      = RewTerm(func=idle_penalty, params={"idle_steps": IDLE_PENALTY_STEPS}, weight=0.02)  # 0/-1 → -0.02
     drop      = RewTerm(func=drop_penalty,            weight=-2.0)
 
 
