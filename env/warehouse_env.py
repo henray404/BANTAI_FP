@@ -69,11 +69,11 @@ IMG_HW        = 64    # camera resolution (square)
 MAX_LIN_SPEED = 1.5   # max base linear speed m/s
 MAX_ANG_SPEED = 1.5   # max base yaw rate rad/s
 
-# Carry model (team decision 2026-06-20, revised): default "kinematic" — on grab the box is HIDDEN
-# (not rendered, saves compute + avoids weld glitches) and teleported to follow the robot each step
-# (kinematic carry); it reappears on release/reset. "physics" (UsdPhysics.FixedJoint weld, env.attach)
-# is kept as a fallback for a fully-simulated carry. See docs/progress_p4.md.
-CARRY_MODE = "kinematic"
+# Carry model (team decision 2026-06-21, Henry): default "physics" — on grab the box is welded to
+# the chassis with a UsdPhysics.FixedJoint (env.attach) and STAYS VISIBLE, physically carried (it
+# rides in front of the robot and moves with it). "kinematic" (hide + teleport each step) is kept
+# as a lighter fallback. See docs/progress_p4.md.
+CARRY_MODE = "physics"
 
 # Carry anchor: a held box rides at this offset from the chassis (base_link) — in front + raised —
 # so it is VISIBLY lifted in front of the robot instead of snapping into the tucked hand/body mesh.
