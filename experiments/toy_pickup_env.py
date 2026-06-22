@@ -149,6 +149,25 @@ class ToyPickupEnv:
             r -= R_DROP
         return float(r), bool(deliver_event)
 
+    # ── checkpoint capture / restore (mirrors recording.sim_state for Isaac) ──
+    def capture(self) -> dict:
+        """Snapshot the full toy state for a checkpoint rewind."""
+        return {
+            "base_xy": self.base_xy.copy(), "base_yaw": float(self.base_yaw),
+            "ee_pos": self.ee_pos.copy(), "box_xyz": self.box_xyz.copy(),
+            "holding": bool(self.holding), "gripper": float(self.gripper), "t": int(self.t),
+        }
+
+    def restore(self, blob: dict) -> None:
+        """Rewind the toy state to a captured checkpoint."""
+        self.base_xy = blob["base_xy"].copy()
+        self.base_yaw = blob["base_yaw"]
+        self.ee_pos = blob["ee_pos"].copy()
+        self.box_xyz = blob["box_xyz"].copy()
+        self.holding = blob["holding"]
+        self.gripper = blob["gripper"]
+        self.t = blob["t"]
+
     # ── obs ──────────────────────────────────────────────────────────────
     def _obs(self) -> dict:
         """Subset of the 9-key contract that CA-SLOPE + the harness consume (env-local frame)."""

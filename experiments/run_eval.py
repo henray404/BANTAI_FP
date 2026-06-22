@@ -52,6 +52,8 @@ def main() -> None:
     p.add_argument("--ablation", action="store_true",
                    help="run all three modes back-to-back (RQ2 sweep); overrides --mode")
     p.add_argument("--out", default="training/results/eval", help="output dir for CSVs")
+    p.add_argument("--record_dir", default="", help="also record each episode as a replayable run "
+                   "here (then rank with scripts/rank_runs.py)")
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2], help="seeds per scenario")
     p.add_argument("--max_steps", type=int, default=600, help="episode step cap")
     p.add_argument("--run_id", default="toy", help="tag written into every CSV row")
@@ -62,7 +64,7 @@ def main() -> None:
         harness = EvalHarness(
             mode=mode, seeds=tuple(args.seeds), max_steps=args.max_steps, run_id=args.run_id,
         )
-        results = harness.run(args.out)
+        results = harness.run(args.out, record_dir=args.record_dir or None)
         _print_table(mode, results)
     print(f"\n[OK] CSVs written under {Path(args.out).resolve()}")
     print("     steps_<mode>.csv = per-step trace · summary_<mode>.csv = per-episode metrics")

@@ -110,8 +110,12 @@ class EvalHarness:
         )
         return float(np.asarray(f).reshape(-1)[0])
 
-    def run_episode(self, scenario: Scenario, seed: int, step_writer=None) -> EpisodeResult:
-        """Run one scenario/seed to termination, streaming step rows; return the episode summary."""
+    def run_episode(self, scenario: Scenario, seed: int, step_writer=None, recorder=None) -> EpisodeResult:
+        """Run one scenario/seed to termination, streaming step rows; return the episode summary.
+
+        If `recorder` (a TrajectoryRecorder) is given, each step is also recorded as its own run and
+        the run-level summary (success/steps/deliver_step/return) is set for per-scenario ranking.
+        """
         env = ToyPickupEnv(max_steps=self.max_steps)
         if hasattr(self.policy, "reset"):
             self.policy.reset()
@@ -138,15 +142,22 @@ class EvalHarness:
                 deliver_step = step
             success = success or bool(info["success"])
 
-            if step_writer is not None:
-                step_writer.writerow(
-                    self._step_row(scenario, seed, step, info, next_obs, action,
-                                   base_r, slope_r, total_r, cum_base, cum_total, done)
-                )
+            if step_writer is not None or recorder is not None:
+                row = self._step_row(scenario, seed, step, info, next_obs, action,
+                                     base_r, slope_r, total_r, cum_base, cum_total, done)
+                if step_writer is not None:
+                    step_writer.writerow(row)
+                if recorder is not None:
+                    recorder.add(row)
 
             obs = next_obs
             if done:
                 break
+
+        if recorder is not None:
+            recorder.set_summary({"success": int(success), "steps": step,
+                                  "deliver_step": deliver_step, "grasp_step": grasp_step,
+                                  "return": round(cum_total, 4)})
 
         final_dist = float(np.linalg.norm(obs["box_pos"][:2] - obs["goal_pos"][:2]))
         return EpisodeResult(
@@ -182,8 +193,13 @@ class EvalHarness:
             "drop_event": int(info["drop_event"]), "done": int(done), "success": int(info["success"]),
         }
 
-    def run(self, out_dir: str | Path) -> list[EpisodeResult]:
-        """Run every scenario x seed; write <out_dir>/steps_<mode>.csv and summary_<mode>.csv."""
+    def run(self, out_dir: str | Path, record_dir: str | Path | None = None) -> list[EpisodeResult]:
+        """Run every scenario x seed; write steps_/summary_ CSVs.
+
+        If `record_dir` is given, ALSO record each episode as its own replayable run
+        (<record_dir>/<scenario>_<mode>_seed<seed>.csv + .meta.json) so scripts/rank_runs.py can
+        score them per scenario and pick the best demo run.
+        """
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         steps_path = out / f"steps_{self.mode}.csv"
@@ -197,10 +213,24 @@ class EvalHarness:
             summary_writer.writeheader()
             for scn in self.scenarios:
                 for seed in self.seeds:
-                    res = self.run_episode(scn, seed, step_writer=step_writer)
+                    recorder = self._make_recorder(record_dir, scn, seed) if record_dir else None
+                    res = self.run_episode(scn, seed, step_writer=step_writer, recorder=recorder)
+                    if recorder is not None:
+                        recorder.close()
                     results.append(res)
                     summary_writer.writerow(self._summary_row(res))
         return results
+
+    def _make_recorder(self, record_dir, scn: Scenario, seed: int):
+        """Create a per-episode TrajectoryRecorder tagged with the scenario for ranking."""
+        from recording.recorder import TrajectoryRecorder
+        stem = Path(record_dir) / f"{scn.name}_{self.mode}_seed{seed}"
+        meta = {
+            "run_id": stem.name, "policy": "scripted_toy", "seed": seed,
+            "scenario": scn.name, "category": CATEGORY_NAMES[scn.category], "color": scn.color,
+            "slope_mode": self.mode, "control_hz": 10.0, "source": "toy_eval_harness",
+        }
+        return TrajectoryRecorder(stem, metadata=meta)
 
     def _summary_row(self, r: EpisodeResult) -> dict:
         """One SUMMARY_COLUMNS row from an EpisodeResult."""

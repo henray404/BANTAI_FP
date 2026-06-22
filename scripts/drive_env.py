@@ -53,6 +53,12 @@ parser.add_argument("--chase_height", type=float, default=4.0,
 parser.add_argument("--log", type=str, default="",
                     help="Write a per-step diagnostic CSV to this path (relative to project root). "
                          "Empty = off. Captures action, ee_pos, base roll/pitch/yaw, gripper, holding.")
+parser.add_argument("--record", type=str, default="",
+                    help="Write a FULL replayable run (all joints + poses + box + metadata) to this "
+                         "path stem. Produces <path>.csv + <path>.meta.json playable via replay_csv.py. "
+                         "Records one episode (until done), then stops. Empty = off.")
+parser.add_argument("--seed", type=int, default=None,
+                    help="Env seed (stored in the recorded metadata so replay reproduces the scene).")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True  # warehouse env always builds the onboard camera
@@ -79,6 +85,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from env.warehouse_env import WarehouseEnvCfg, WarehouseGymEnv  # noqa: E402
+from recording.recorder import TrajectoryRecorder  # noqa: E402
+from recording.state_extractor import build_metadata, step_row  # noqa: E402
 
 
 def _save_frame(frame: np.ndarray, path: Path) -> None:
@@ -137,7 +145,7 @@ def main() -> None:
     cfg = WarehouseEnvCfg()
     cfg.scene.num_envs = 1
     env = WarehouseGymEnv(cfg=cfg)
-    obs, _ = env.reset()
+    obs, _ = env.reset(seed=args_cli.seed)
     print(f"[drive_env] reset ok. obs keys = {sorted(obs.keys())}")
     print(f"[drive_env] action = [base_lin, base_ang, ee_dx, ee_dy, ee_dz, gripper], shape (6,)")
 
@@ -169,12 +177,34 @@ def main() -> None:
                         "base_yaw_deg", "base_wx", "base_wy", "gripper", "holding"])
         print(f"[drive_env] logging per-step diagnostic CSV -> {log_path}")
 
+    # Full replayable recorder (one episode). Separate from --log: same playable format as
+    # scripts/record_scenario.py, so a teleop run can be replayed via scripts/replay_csv.py.
+    rec = None
+    if args_cli.record:
+        meta = build_metadata(env, seed=args_cli.seed, policy="teleop",
+                              run_id=Path(args_cli.record).name)
+        rec = TrajectoryRecorder(args_cli.record, metadata=meta)
+        print(f"[drive_env] recording FULL replayable run -> {rec.csv_path} (one episode)")
+
     t0 = time.time()
     step = 0
     while simulation_app.is_running():
         action = _build_action(base_kb.advance(), arm_kb.advance(), env.num_envs)
-        obs, reward, terminated, truncated, _ = env.step(action)
-        if bool(terminated[0]) or bool(truncated[0]):
+        obs, reward, terminated, truncated, info = env.step(action)
+        done = bool(terminated[0]) or bool(truncated[0])
+
+        # Record the full per-step state BEFORE any reset (so the run is one clean episode).
+        if rec is not None:
+            rec.add(step_row(env, step=step, t=time.time() - t0, action=action, reward=reward,
+                             terminated=terminated, truncated=truncated, info=info))
+            if done:
+                rec.set_summary({"steps": step + 1, "success": int(bool(terminated[0]))})
+                rec.close()
+                print(f"[drive_env] recorded run saved -> {rec.csv_path} ({step + 1} steps). "
+                      f"Replay: python scripts/replay_csv.py --run {args_cli.record}")
+                rec = None
+
+        if done:
             obs, _ = env.reset()
 
         if args_cli.chase > 0:
@@ -209,6 +239,10 @@ def main() -> None:
 
     if log_f is not None:
         log_f.close()
+    if rec is not None:  # quit before the episode ended — save what we have
+        rec.set_summary({"steps": step, "success": 0, "note": "incomplete (quit before done)"})
+        rec.close()
+        print(f"[drive_env] recorded partial run -> {rec.csv_path} ({step} steps)")
 
 
 if __name__ == "__main__":
