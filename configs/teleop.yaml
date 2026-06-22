@@ -2,7 +2,7 @@
 # Loaded as argparse defaults: command-line flags still override these, these override the
 # baked-in fallbacks. Edit + rerun drive_env — no code change. Delete a key to use its CLI default.
 teleop:
-  ee_sens:      4.3    # arm EE delta per held key (m per 10Hz step). 0.05 was too small; 0.3 ~= 3 m/s
+  ee_sens:      0.3    # arm EE delta per held key (m per 10Hz step). 0.05 was too small; 0.3 ~= 3 m/s
   lin:          5.0    # base forward sensitivity (maps to [-1,1] action)
   ang:          5.0    # base yaw sensitivity
   chase:        1      # 3rd-person chase camera (1=on, 0=off)

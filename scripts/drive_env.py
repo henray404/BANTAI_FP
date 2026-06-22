@@ -162,7 +162,7 @@ def main() -> None:
     """Build the env, then loop: keyboard -> (6,) action -> env.step; print EE / grasp state."""
     cfg = WarehouseEnvCfg()
     cfg.scene.num_envs = 1
-    env = WarehouseGymEnv(cfg=cfg, arm_active=True)   # teleop: drive the Franka (training stays frozen)
+    env = WarehouseGymEnv(cfg=cfg, arm_active=True)   # teleop: force active arm regardless of stage
     obs, _ = env.reset(seed=args_cli.seed)
     print(f"[drive_env] reset ok. obs keys = {sorted(obs.keys())}")
     print(f"[drive_env] action = [base_lin, base_ang, ee_dx, ee_dy, ee_dz, gripper], shape (6,)")

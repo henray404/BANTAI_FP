@@ -41,6 +41,23 @@ def drop_penalty(env) -> torch.Tensor:
     return env.drop_event.float()
 
 
+def box_dropped(env) -> torch.Tensor:
+    """(N,) bool: a carried box fell to the floor this step (env.drop_event). Termination → reset."""
+    return env.drop_event
+
+
+def carry_regress_penalty(env, regress_steps: int = 50) -> torch.Tensor:
+    """-1 once a HELD box has gone `regress_steps` control steps WITHOUT nearing its goal zone
+    (backing up / dawdling on the way to the finish zone). Use with a POSITIVE weight (like idle) →
+    per-step cost until it makes progress again. Reads env._carry_regress_steps (set each step by
+    WarehouseRLEnv._update_carry_progress); only counts while holding, so the approach phase (which
+    heads to the box, not the zone) is never penalised."""
+    steps = getattr(env, "_carry_regress_steps", None)
+    if steps is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return -(steps >= regress_steps).float()
+
+
 def pickup_delivered(env) -> torch.Tensor:
     """(N,) bool: holding AND box xy within DELIVER_RADIUS_M of the goal zone center."""
     in_zone = torch.norm(env.box_pos[:, :2] - env.goal_pos[:, :2], dim=-1) < DELIVER_RADIUS_M

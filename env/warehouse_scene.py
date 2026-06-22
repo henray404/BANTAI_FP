@@ -55,6 +55,32 @@ from env.layout_grid import (
 )
 
 
+# ── Scene-size knobs (8GB VRAM relief) ────────────────────────────────
+# Full scene (18 racks + 54 decks + 18 dynamic boxes + props + camera) saturates the 8GB Blackwell;
+# windowed it OOMs (BAR1 aperture full -> PhysX CUDA error 700, see bugs_errors). These spawn a
+# SUBSET so a single-box stage (Stage 2) fits: fewer rigid bodies + material binds + GPU contact
+# pairs. From configs/env_config.yaml `scene:` (num_boxes <= 0 / absent = ALL; spawn_props bool).
+def _scene_knobs() -> tuple[int, bool]:
+    """(num_boxes, spawn_props) from env_config.yaml `scene:`. Safe defaults = (0=all, True)."""
+    cfg_path = Path(__file__).resolve().parents[1] / "configs" / "env_config.yaml"
+    try:
+        import yaml
+        scene = ((yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}).get("scene", {}) or {})
+        return int(scene.get("num_boxes", 0) or 0), bool(scene.get("spawn_props", True))
+    except Exception:   # missing/locked/malformed yaml must never block scene construction
+        return 0, True
+
+
+def _balanced_box_subset(specs: list, n: int) -> list:
+    """First n boxes (contiguous prefix). Boxes cycle fragile/regular/heavy by index, so a prefix
+    of length divisible by 3 stays category-balanced (use 3/6/9...). Box i sits at rack i, so the
+    SAME prefix length selects the matching racks (see ACTIVE_RACK_POSITIONS). n<=0 -> all."""
+    return specs if n <= 0 or n >= len(specs) else specs[:n]
+
+
+_NUM_BOXES, _SPAWN_PROPS = _scene_knobs()
+
+
 # ── Asset Paths ───────────────────────────────────────────────────────
 ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets"
 
@@ -221,25 +247,31 @@ RIDGEBACK_FRANKA_CFG = ArticulationCfg(
 RIDGEBACK_FRANKA_CFG.spawn.func = _spawn_ridgeback_welded
 
 
-def _apply_home_pose_override() -> None:
-    """Override panda_joint1..7 spawn targets from configs/env_config.yaml (robot.home_joint_pos).
-
-    Lets the arm rest/reach pose be retuned in YAML without editing code — the spawn pose, the
-    relative-IK anchor, and _freeze_arm (which reads default_joint_pos) all follow it. Missing
-    file/keys keep the tucked defaults above. Verify any change in sim (teleop / explore_scene).
-    """
-    cfg_path = Path(__file__).resolve().parents[1] / "configs" / "env_config.yaml"
-    if not cfg_path.exists():
-        return
-    text = cfg_path.read_text(encoding="utf-8")
+def _read_yaml_safe(path: Path) -> dict:
+    """Parse a YAML file to a dict (pyyaml, ruamel fallback); {} if the file is absent."""
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding="utf-8")
     try:
         import yaml
-        data = yaml.safe_load(text) or {}
+        return yaml.safe_load(text) or {}
     except ImportError:
         import ruamel.yaml as ryaml
-        data = ryaml.YAML(typ="safe").load(text) or {}
-    home = (data.get("robot") or {}).get("home_joint_pos") or {}
-    for joint, value in home.items():
+        return ryaml.YAML(typ="safe").load(text) or {}
+
+
+def _apply_home_pose_override() -> None:
+    """Override panda_joint1..7 spawn targets from configs (env_config.yaml, then calib/arm_calib.yaml).
+
+    Precedence: env_config.yaml `robot.home_joint_pos` first, then calib/arm_calib.yaml
+    `arm_calib.home_joint_pos` (auto-written by scripts/calibrate_arm.py --auto) OVERRIDES it — so a
+    fresh auto-calibration is used by the robot immediately (spawn pose, relative-IK anchor,
+    _freeze_arm). Missing files/keys keep the tucked defaults above. Verify any change in sim.
+    """
+    root = Path(__file__).resolve().parents[1]
+    env_home = (_read_yaml_safe(root / "configs" / "env_config.yaml").get("robot") or {}).get("home_joint_pos") or {}
+    calib_home = (_read_yaml_safe(root / "calib" / "arm_calib.yaml").get("arm_calib") or {}).get("home_joint_pos") or {}
+    for joint, value in {**env_home, **calib_home}.items():   # calib (auto) wins over env_config
         if joint in RIDGEBACK_FRANKA_CFG.init_state.joint_pos:
             RIDGEBACK_FRANKA_CFG.init_state.joint_pos[joint] = float(value)
 
@@ -266,6 +298,11 @@ ISLAND_RACK_DX = 1.5
 # RACK_POSITIONS sourced from layout_grid (pure-Python, no Isaac import) so tests can
 # verify positions without launching Isaac Sim.
 RACK_POSITIONS = _RACK_POSITIONS_LG
+
+# When num_boxes is set (env_config.yaml scene.num_boxes), spawn ONLY the racks that hold a box —
+# box i sits at rack i, so the same prefix length selects the racks. Drops 15 racks + 45 decks for
+# Stage 2 (num_boxes=3) -> the big VRAM cut on the 8GB Blackwell. 0 / >=18 = every rack.
+ACTIVE_RACK_POSITIONS = RACK_POSITIONS if _NUM_BOXES <= 0 else RACK_POSITIONS[:_NUM_BOXES]
 
 # Hardcoded shelf deck levels (top surface z, meters).
 # Rack height ~2.0m (measured 2026-05-30). 3 evenly-spaced levels.
@@ -307,7 +344,10 @@ RACK_COLLIDER_COLOR   = None                # None = collision-only (no material
 # Category cycles fragile/regular/heavy by rack index -> 6 of each across 18 racks.
 # Boxes are graspable rigid bodies; the commanded box is selected at runtime by goal_id.
 # Sourced from layout_grid (pure-Python) so tests can verify specs without Isaac Sim.
-TARGET_BOX_SPECS: list[tuple[str, float, float, tuple[float, float, float]]] = _TARGET_BOX_SPECS_LG
+# Subset to _NUM_BOXES (category-balanced) when set in env_config.yaml; 0 = all 18 (default).
+TARGET_BOX_SPECS: list[tuple[str, float, float, tuple[float, float, float]]] = _balanced_box_subset(
+    _TARGET_BOX_SPECS_LG, _NUM_BOXES
+)
 
 # Back-compat alias: env code iterates ITEM_SPECS.
 ITEM_SPECS = TARGET_BOX_SPECS
@@ -556,7 +596,7 @@ class WarehouseSceneCfg(InteractiveSceneCfg):
         - 18 boxes (RigidObjectCfg — gravity, one per rack on the floor in front, within Franka reach)
         - 11 props (static USD)
         """
-        for i, rack_pos in enumerate(RACK_POSITIONS):
+        for i, rack_pos in enumerate(ACTIVE_RACK_POSITIONS):   # subset when scene.num_boxes is set
             setattr(self, f"rack_{i}", _rack_cfg(i, rack_pos))
             if RACK_COLLIDER_ENABLED:
                 setattr(self, f"rack_collider_{i}", _rack_collider_cfg(i, rack_pos))
@@ -564,5 +604,6 @@ class WarehouseSceneCfg(InteractiveSceneCfg):
                 setattr(self, f"shelf_{i}_{j}", _shelf_deck_cfg(i, j, rack_pos, shelf_z))
         for name, size, mass, pos in ITEM_SPECS:
             setattr(self, name, _item_cfg(name, size, mass, pos))
-        for name, usd_path, pos in PROP_SPECS:
-            setattr(self, name, _prop_cfg(name, usd_path, pos))
+        if _SPAWN_PROPS:   # skip the 8 decorative props (pallets/cones/signs) for VRAM relief
+            for name, usd_path, pos in PROP_SPECS:
+                setattr(self, name, _prop_cfg(name, usd_path, pos))

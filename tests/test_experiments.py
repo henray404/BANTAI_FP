@@ -27,16 +27,18 @@ from env.her_nm512 import relabel_cache_episode
 
 # ── configs registry ──────────────────────────────────────────────────────────
 
-def test_six_configs_eighteen_runs():
-    assert len(configs.CONFIGS) == 6
-    assert len(configs.all_runs()) == 18
-    assert {c.idx for c in configs.CONFIGS} == {1, 2, 3, 4, 5, 6}
+def test_three_configs_nine_runs():
+    # CA-SLOPE-only study (trimmed 2026-06-23): dropped SAC (#1) + both HER configs (#5, #6).
+    assert len(configs.CONFIGS) == 3
+    assert len(configs.all_runs()) == 9
+    assert {c.idx for c in configs.CONFIGS} == {2, 3, 4}
 
 
-def test_factorial_flags():
-    # The 2x2 DreamerV3 quadrant must cover all (ca_slope, her) combinations.
+def test_caslope_ablation_flags():
+    # DreamerV3 configs isolate CA-SLOPE on/off only (HER dropped).
     quad = {(c.ca_slope, c.visual_her) for c in configs.CONFIGS if c.algo == "dreamer"}
-    assert quad == {(False, False), (True, False), (False, True), (True, True)}
+    assert quad == {(False, False), (True, False)}
+    assert not any(c.visual_her for c in configs.CONFIGS)   # no HER anywhere
 
 
 def test_isolation_comparisons_reference_real_configs():

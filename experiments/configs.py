@@ -1,17 +1,18 @@
 # experiments/configs.py
-# P5 — single source of truth for the 6-config ablation study.
+# P5 — single source of truth for the ablation study.
 #
-# Design (from the experiment spec, 2026-06-21):
-#   2x2 factorial ablation (CA-SLOPE on/off) x (Visual HER on/off) on DreamerV3,
-#   plus two model-free baselines (SAC, PPO) = 6 configurations.
-#   Each config x 3 seeds {0,1,2} = 18 runs, 200_000 env steps each,
+# Design (CA-SLOPE-only study, trimmed 2026-06-23 from the original 6-config 2x2):
+#   CA-SLOPE on/off on DreamerV3 (#3 vanilla vs #4 ca_slope) + one PPO baseline (#2) = 3 configs.
+#   Visual HER (#5, #6) and the SAC baseline (#1) dropped — focus on CA-SLOPE.
+#   Each config x 3 seeds {0,1,2} = 9 runs, 200_000 env steps each,
 #   periodic eval every 10_000 steps over 5 episodes.
+#   (idx kept at 2/3/4 from the original table so lognames + prior results stay stable.)
 #
 # This module is PURE python (no Isaac / torch import) so it is importable from the
 # orchestrator (run_all.py), the analysis script (analyze.py), and the entry scripts
 # (train_dreamer.py / train_sac.py) without launching the simulator.
 
-"""Registry of the 6 experiment configurations + per-config hyperparameters + papers."""
+"""Registry of the experiment configurations + per-config hyperparameters + papers."""
 
 from __future__ import annotations
 
@@ -61,12 +62,6 @@ class ExperimentConfig:
 # papers reference the numbered entries in docs/research/referensi.md.
 CONFIGS: tuple[ExperimentConfig, ...] = (
     ExperimentConfig(
-        idx=1, name="sac", algo="sac", ca_slope=False, visual_her=False,
-        kind="model-free baseline",
-        isolates="model-free floor (off-policy)",
-        papers=("SAC-Haarnoja2018-#18", "SB3-DLR-RM"),
-    ),
-    ExperimentConfig(
         idx=2, name="ppo", algo="ppo", ca_slope=False, visual_her=False,
         kind="model-free baseline",
         isolates="model-free floor (on-policy)",
@@ -75,38 +70,21 @@ CONFIGS: tuple[ExperimentConfig, ...] = (
     ExperimentConfig(
         idx=3, name="dreamer_vanilla", algo="dreamer", ca_slope=False, visual_her=False,
         kind="model-based baseline",
-        isolates="pure world-model effect (vs #1,#2)",
+        isolates="pure world-model effect (vs #2)",
         papers=("DreamerV3-Hafner2023-#1", "DayDreamer-#4", "NM512-torch"),
     ),
     ExperimentConfig(
         idx=4, name="dreamer_caslope", algo="dreamer", ca_slope=True, visual_her=False,
-        kind="ablation",
+        kind="ablation (proposed)",
         isolates="CA-SLOPE contribution over the world model (vs #3)",
         papers=("DreamerV3-Hafner2023-#1", "PBRS-Ng1999-#15", "Devlin2012-#16"),
-    ),
-    ExperimentConfig(
-        idx=5, name="dreamer_her", algo="dreamer", ca_slope=False, visual_her=True,
-        kind="ablation",
-        isolates="Visual HER contribution over the world model (vs #3)",
-        papers=("DreamerV3-Hafner2023-#1", "HER-Andrychowicz2017-#11",
-                "Sahni2019-#12", "RIG-Nair2018-#13"),
-    ),
-    ExperimentConfig(
-        idx=6, name="dreamer_full", algo="dreamer", ca_slope=True, visual_her=True,
-        kind="full (proposed)",
-        isolates="combined effect; #6vs#4 = pure HER, #6vs#5 = pure CA-SLOPE",
-        papers=("DreamerV3-Hafner2023-#1", "PBRS-Ng1999-#15",
-                "HER-Andrychowicz2017-#11", "RIG-Nair2018-#13"),
     ),
 )
 
 # Pairwise comparisons to report (spec "Uji signifikansi"): (A_idx, B_idx, what).
+# HER configs (#5, #6) and the SAC baseline (#1) dropped 2026-06-23 — CA-SLOPE-only study.
 ISOLATION_COMPARISONS: tuple[tuple[int, int, str], ...] = (
-    (6, 4, "pure Visual HER contribution"),
-    (6, 5, "pure CA-SLOPE contribution"),
     (4, 3, "CA-SLOPE over world model"),
-    (5, 3, "Visual HER over world model"),
-    (3, 1, "model-based vs SAC"),
     (3, 2, "model-based vs PPO"),
 )
 
@@ -116,7 +94,7 @@ def by_idx(idx: int) -> ExperimentConfig:
     for c in CONFIGS:
         if c.idx == idx:
             return c
-    raise KeyError(f"No experiment config with idx={idx} (valid: 1..6).")
+    raise KeyError(f"No experiment config with idx={idx} (valid: 2, 3, 4).")
 
 
 def by_name(name: str) -> ExperimentConfig:
@@ -133,13 +111,13 @@ def all_runs() -> list[tuple[ExperimentConfig, int]]:
 
 
 if __name__ == "__main__":
-    # Smoke check: 6 configs, 18 runs, comparisons reference real indices.
-    assert len(CONFIGS) == 6, len(CONFIGS)
-    assert len({c.idx for c in CONFIGS}) == 6
-    assert len(all_runs()) == 18
+    # Smoke check: 3 configs (CA-SLOPE-only study), 9 runs, comparisons reference real indices.
+    assert len(CONFIGS) == 3, len(CONFIGS)
+    assert len({c.idx for c in CONFIGS}) == 3
+    assert len(all_runs()) == 9
     for a, b, _ in ISOLATION_COMPARISONS:
         by_idx(a); by_idx(b)
     for c in CONFIGS:
         print(f"#{c.idx} {c.logname:24s} algo={c.algo:8s} "
               f"ca_slope={c.ca_slope!s:5s} her={c.visual_her!s:5s} | {c.kind}")
-    print("OK: 6 configs, 18 runs.")
+    print("OK: 3 configs, 9 runs.")

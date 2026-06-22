@@ -42,17 +42,18 @@ robot:
   spawn_y: [11.0, 14.0]     # receiving-north y range
   # Arm home/rest pose — panda_joint1..7 in RADIANS. The arm spawns here, relative-IK anchors from
   # it, and _freeze_arm holds it. LOADED LIVE (env/warehouse_scene._apply_home_pose_override).
-  # Current = tucked pose (hand folds BACK toward base — why the arm looks like it works "behind").
-  # To reach FORWARD + DOWN over front boxes: unfold the elbow (joint4 less negative, e.g. -2.0) and
-  # tilt the shoulder forward (joint2 ~0.2-0.4), keep joint6 high so the hand points down. Edit one
-  # joint at a time and VERIFY in sim (drive_env / explore_scene) — bad angles break the grasp.
+  # Current = FORWARD-DOWN (APPLIED 2026-06-22 from calib; was tucked -0.569/-2.810/2.0). UNVERIFIED
+  # in sim — verify with drive_env_v2 (EE should sit lower/forward, reach toward the floor box; calib
+  # showed the tucked pose was low-manipulability ~0.012 = the "Z ngawur at rest"). AFFECTS TRAINING
+  # spawn + the frozen-arm grasp geometry too (warehouse_scene._apply_home_pose_override). Revert the
+  # 3 values below if the arm self-collides or the grasp breaks; edit ONE joint at a time + re-verify.
   home_joint_pos:
     panda_joint1: 0.0
-    panda_joint2: -0.569    # forward-down try: 0.3
+    panda_joint2: 0.3       # forward-down (was -0.569 tucked) — shoulder tilted forward
     panda_joint3: 0.0
-    panda_joint4: -2.810    # forward-down try: -2.0  (less folded = reaches further forward)
+    panda_joint4: -2.0      # forward-down (was -2.810) — elbow less folded = reaches forward
     panda_joint5: 0.0
-    panda_joint6: 2.0       # forward-down try: 2.3      (keep hand pointing down)
+    panda_joint6: 2.3       # forward-down (was 2.0) — keep hand pointing down
     panda_joint7: 0.741
   # VERIFY on first run: base prismatic frame (world vs body — run smoke_test.py);
   #   chassis BODY name for contact sensor (currently guessed "base_link"); VRAM on 8GB.
@@ -112,6 +113,14 @@ termination:
   out_of_bounds_half_extent_y: 14.5
 
 scene:
+  # Scene-size knobs (8GB VRAM relief) — read by env/warehouse_scene._scene_knobs.
+  # num_boxes ALSO drops the matching racks+decks (box i sits at rack i): num_boxes=3 -> 3 racks +
+  # 9 decks + 3 boxes instead of 18 + 54 + 18. The big VRAM cut so it fits WINDOWED on the 8GB RTX
+  # 5050 (full scene OOMs: BAR1 fills -> PhysX CUDA error 700; see bugs_errors/2026-06-23_oom-...md).
+  # Raise to 18 for the full warehouse (A100 / headless). 0 = all. Use multiples of 3 (3-way goal_id).
+  num_boxes: 3
+  spawn_props: false   # skip the 8 decorative props (pallets/cones/signs) — pure VRAM save
+
   room:
     half_extent_x: 10.0
     half_extent_y: 15.0

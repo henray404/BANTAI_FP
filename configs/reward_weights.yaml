@@ -29,6 +29,15 @@ rewards:
   # raise this to punish hitting things harder; lower (e.g. 1.0) if the robot freezes to dodge it.
   collision:  2.0     # x(-1) => -2/step when chassis contact > 5N (rack / obstacle / wall)
   drop:      -2.0     # one-shot when box dropped mid-carry outside a zone
+  under_rack: 2.0     # x(-1) => -2/step while the chassis is inside ANY rack footprint (under-rack)
+  carry_regress: 0.1  # x(-1) => -0.1/step once a HELD box stalls/backs-up ~5s without nearing the
+                      # zone (CARRY_REGRESS_STEPS in warehouse_env.py). Stops "kelamaan mundur".
+
+  # ── Failure-reset penalty (high, fixed) ──
+  # One-shot HIGH cost on ANY failure reset: crash (>50N), dropped carried box, no-grasp 30s timeout,
+  # out-of-bounds, or stuck. FIXED (not escalating — a non-stationary reward hurts the world model).
+  # Raise magnitude to punish failures harder; scaled against deliver=+10, grasp=+5.
+  failure:   -15.0    # one-shot when any failure-reset termination fires
 
   # Two idle tiers — both reuse the same idle detector, stacking once past their thresholds:
   idle:       0.02    # soft anti-freeze: x(-1) => -0.02/step once idle >= idle_steps

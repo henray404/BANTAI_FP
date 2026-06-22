@@ -10,7 +10,7 @@ from __future__ import annotations
 
 # Display order = the RewardsCfg term order (warehouse_env.RewardsCfg). Missing terms are skipped,
 # so renaming a term degrades gracefully instead of crashing the teleop loop.
-TERM_ORDER = ("approach", "grasp", "carry", "deliver", "time_pen", "collision", "idle", "idle_slow", "drop")
+TERM_ORDER = ("approach", "grasp", "carry", "deliver", "time_pen", "collision", "idle", "idle_slow", "drop", "failure", "under_rack", "carry_regress")
 
 
 def reward_breakdown(rl_env, env_idx: int = 0) -> dict[str, float]:

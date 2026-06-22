@@ -34,7 +34,7 @@ import torch
 from gymnasium import spaces
 
 import isaaclab.envs.mdp as mdp
-from isaaclab.controllers import DifferentialIKControllerCfg
+from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
 from isaaclab.assets import Articulation
 from isaaclab.envs import ManagerBasedRLEnv, ManagerBasedRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
@@ -48,14 +48,19 @@ from isaaclab.utils import configclass
 
 from env.warehouse_scene import ITEM_SPECS, SHELF_DECK_SIZE, ZONE_SPECS, WarehouseSceneCfg
 from env.warehouse_reward import (
+    collided,
     collision_penalty,
     idle_penalty,
+    no_grasp_timeout,
     out_of_bounds,
     time_penalty,
+    under_rack_penalty,
 )
 from env.reward_pickup import (
     approach_box_distance,
+    box_dropped,
     carry_distance,
+    carry_regress_penalty,
     grasp_success_reward,
     drop_penalty,
     pickup_delivered,
@@ -82,6 +87,36 @@ CARRY_MODE = "physics"
 GRIP_FWD = 0.6   # metres in front of the chassis (body +x)
 GRIP_UP  = 0.7   # metres above the chassis origin
 
+# ── Active-arm control (Lane B) ───────────────────────────────────────
+# Port of the VERIFIED scripts/drive_env_v2.py teleop control into training: an absolute-hold EE
+# target accumulator + DLS pose IK + the v2 clamp stack, replacing the stock relative-mode IK term
+# (which ratchet/drifts — see bugs_errors/2026-06-22_ik-target-root-frame-drag-flail.md, Lane B).
+# Engaged for curriculum stage >= 2 (grasp needs an active arm); stage 1 keeps the frozen arm.
+# Rate note: v2 ran these per 200 Hz physics step; here _drive_arm runs once per 10 Hz CONTROL step
+# and the joint PD tracks the target across the 20 substeps — so smoothing/step caps are retuned for
+# 10 Hz (looser than v2's 200 Hz values), not copied verbatim. P1 tunes in sim via drive_env_v2.py.
+ARM_IK_DAMP        = 0.1    # DLS lambda for top-down pose IK (no wrist-flip collapse)
+ARM_SMOOTH_BETA    = 0.5    # EXP low-pass on IK joint targets per control step (1.0 = raw)
+ARM_MAX_JOINT_STEP = 0.25   # rad cap on |target - current| per control step (flip-safety, ~2.5 rad/s)
+ARM_JOINT_MARGIN   = 0.95   # clamp joints to this fraction of the hard USD range, centred
+ARM_REACH_X_BACK   = 0.0    # min EE-target x (base frame): no backward reach into base/rack
+ARM_REACH_Z_MIN    = 0.05   # min EE-target z (base frame): floor
+ARM_REACH_Z_MAX    = 1.1    # max EE-target z (base frame): no over-reach up
+ARM_LEAD_M         = 0.08   # max EE-target lead ahead of the live EE (anti-overrun leash)
+ARM_REACH_R        = 0.95   # radial clamp r_max (|EE - shoulder|); 0 = off
+ARM_REACH_RMIN     = 0.50   # radial clamp r_min
+# calib/arm_calib.yaml (written by scripts/calibrate_arm.py --auto) overrides the radial defaults,
+# same file drive_env_v2.py reads — keeps training on the robot's fitted reach envelope.
+_ARM_CALIB_PATH = pathlib.Path(__file__).resolve().parents[1] / "calib" / "arm_calib.yaml"
+if _ARM_CALIB_PATH.exists():
+    try:
+        import yaml as _yaml
+        _ac = (_yaml.safe_load(_ARM_CALIB_PATH.read_text(encoding="utf-8")) or {}).get("arm_calib", {})
+        ARM_REACH_R = float(_ac.get("reach_r", ARM_REACH_R))
+        ARM_REACH_RMIN = float(_ac.get("reach_rmin", ARM_REACH_RMIN))
+    except Exception:  # malformed/locked calib must never block env construction
+        pass
+
 # Idle/stuck reset: end the episode if the base hasn't translated more than STUCK_MOVE_EPS_M per
 # control step for STUCK_STEPS consecutive steps (~45 s at 10 Hz control) — frees a robot wedged
 # against a wall/rack instead of wasting the full 100 s episode standing still.
@@ -97,6 +132,20 @@ IDLE_PENALTY_STEPS = 50
 # idle control steps (~30 s at 10 Hz) — escalates above the 5 s soft idle nudge but still before the
 # STUCK_STEPS (~45 s) hard reset, so a robot loitering for half a minute pays a real cost first.
 IDLE_SLOW_STEPS = 300
+
+# Carry-regress penalty: while HOLDING, count consecutive control steps where the box gets no closer
+# to its goal zone (backing up / dawdling). Past CARRY_REGRESS_STEPS (~5s @ 10Hz) a per-step cost
+# fires so the robot doesn't reverse forever on the way to the finish zone. Progress = the box→goal
+# distance shrinks by > CARRY_PROGRESS_EPS_M in a step.
+CARRY_REGRESS_STEPS = 50
+CARRY_PROGRESS_EPS_M = 0.02
+
+# Reset-to-checkpoint (num_envs==1): while carrying, snapshot the sim state at grasp and each time
+# the box crosses a closer CHECKPOINT_RING_M ring to the goal (2/4/6 m…). On a FAILURE reset
+# (crash/drop/stuck/bounds) the episode ends cleanly (done=True) and the NEXT episode RESTARTS from
+# the last checkpoint instead of the far spawn — speeds up training without breaking the world model
+# (a clean done, not a mid-episode teleport). Success / time-out / no-checkpoint → fresh spawn.
+CHECKPOINT_RING_M = 2.0
 
 
 # ── Custom Observation Functions ──────────────────────────────────────
@@ -188,6 +237,22 @@ def stuck_timeout(env: ManagerBasedRLEnv) -> torch.Tensor:
     return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
 
+def failure_reset(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """(N,) bool: ANY failure-reset condition this step — crash, dropped carried box, no-grasp
+    timeout, out-of-bounds, or stuck. Excludes success (delivery) and the time-limit truncation.
+    The failure DoneTerms fire on subsets of this; failure_penalty applies the high cost on it.
+    """
+    fail = collided(env) | no_grasp_timeout(env) | out_of_bounds(env) | stuck_timeout(env)
+    if hasattr(env, "drop_event"):
+        fail = fail | env.drop_event
+    return fail
+
+
+def failure_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """+1 on any failure-reset step (use with a large NEGATIVE weight = the 'high punishment')."""
+    return failure_reset(env).float()
+
+
 def robot_heading(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -214,14 +279,17 @@ def robot_heading(
 # ── Actions ───────────────────────────────────────────────────────────
 @configclass
 class ActionsCfg:
-    """Base velocity + arm IK + gripper. Internal action dim = 7 in declaration order:
-    base_vel(3) + arm_ik(3) + gripper(1).
+    """Base velocity + gripper. Internal action dim = 4 in declaration order: base_vel(3) + gripper(1).
 
     The external policy action is (6,) [base_lin, base_ang, ee_dx, ee_dy, ee_dz, gripper];
-    WarehouseGymEnv.step splits it and expands base to [vx, vy, wz] via _base_cmd, then
-    concatenates [base3, ee3, grip1] into this 7-dim internal action. preserve_order keeps the
-    base joint columns aligned with _base_cmd's output. The arm is driven by DifferentialIK
-    (relative EE position, top-down orientation); gripper is binary open/close.
+    WarehouseGymEnv.step splits it, expands base to [vx, vy, wz] via _base_cmd, and concatenates
+    [base3, grip1] into this 4-dim internal action. preserve_order keeps the base joint columns
+    aligned with _base_cmd's output.
+
+    The ARM is NOT a manager action term: the stock DifferentialInverseKinematicsActionCfg is
+    relative-mode and ratchet/drifts (Lane B bug doc 2026-06-22). It is driven manually by
+    WarehouseRLEnv._drive_arm (absolute-hold EE target + clamp stack, ported from the verified
+    drive_env_v2.py) for stage >= 2, and frozen (pinned to home) for stage 1. gripper is binary.
     """
 
     # scale=1.0 — _base_cmd emits joint velocity targets directly.
@@ -233,19 +301,6 @@ class ActionsCfg:
             "dummy_base_revolute_z_joint",
         ],
         preserve_order=True,
-        scale=1.0,
-    )
-
-    # Arm: differential IK on the 7 panda joints. Relative-mode position command (3 dims:
-    # dx,dy,dz in base frame); orientation held fixed (top-down) by the controller. Body
-    # "panda_hand" is the Franka EE link. Mirrors the Isaac-Lift-Cube-Franka-v0 IK term.
-    arm_ik = mdp.DifferentialInverseKinematicsActionCfg(
-        asset_name="robot",
-        joint_names=["panda_joint.*"],
-        body_name="panda_hand",
-        controller=DifferentialIKControllerCfg(
-            command_type="position", use_relative_mode=True, ik_method="dls"
-        ),
         scale=1.0,
     )
 
@@ -376,6 +431,15 @@ class RewardsCfg:
     idle      = RewTerm(func=idle_penalty, params={"idle_steps": IDLE_PENALTY_STEPS}, weight=0.02)  # 0/-1 → -0.02 @5s
     idle_slow = RewTerm(func=idle_penalty, params={"idle_steps": IDLE_SLOW_STEPS},    weight=0.1)   # 0/-1 → -0.1 @30s (heavy "too slow")
     drop      = RewTerm(func=drop_penalty,            weight=-2.0)
+    # One-shot HIGH cost on ANY failure reset (crash / dropped box / no-grasp timeout / bounds /
+    # stuck) — the "punishment yang tinggi tiap reset". Fixed (not escalating: a non-stationary
+    # reward would hurt the DreamerV3 world model). Tunable in configs/reward_weights.yaml.
+    failure    = RewTerm(func=failure_penalty,        weight=-15.0)
+    under_rack = RewTerm(func=under_rack_penalty,     weight=2.0)    # 0/-1 → -2/step while under a rack
+    # While carrying: -1/step once the box has gone CARRY_REGRESS_STEPS steps without nearing the
+    # zone (backing up / dawdling). x(-1)*weight → -0.1/step. Stops "kelamaan mundur" to the finish.
+    carry_regress = RewTerm(func=carry_regress_penalty,
+                            params={"regress_steps": CARRY_REGRESS_STEPS}, weight=0.1)
 
 
 # ── Terminations ──────────────────────────────────────────────────────
@@ -387,6 +451,9 @@ class TerminationsCfg:
     success  = DoneTerm(func=pickup_delivered)   # held box inside its commanded color zone
     bounds   = DoneTerm(func=out_of_bounds, params={"half_extent_x": 9.5, "half_extent_y": 14.5})
     stuck    = DoneTerm(func=stuck_timeout)      # base idle ~45 s → reset (wedged in a wall/rack)
+    crashed  = DoneTerm(func=collided)           # chassis contact > 50 N → reset (nabrak)
+    dropped  = DoneTerm(func=box_dropped)        # carried box fell to the floor → reset
+    no_grasp = DoneTerm(func=no_grasp_timeout)   # 30 s with no grasp → reset (arm-first focus)
 
 
 # ── Env Cfg ───────────────────────────────────────────────────────────
@@ -431,7 +498,8 @@ class WarehouseEnvCfg(ManagerBasedRLEnvCfg):
         # retune shaping without touching code. Missing file/keys keep the RewardsCfg defaults.
         _w = _load_reward_weights()
         for _name in ("approach", "grasp", "carry", "deliver", "time_pen",
-                      "collision", "idle", "idle_slow", "drop"):
+                      "collision", "idle", "idle_slow", "drop", "failure", "under_rack",
+                      "carry_regress"):
             if _name in _w:
                 getattr(self.rewards, _name).weight = float(_w[_name])
         if "idle_steps" in _w:
@@ -475,9 +543,19 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         self.holding = torch.zeros(N, dtype=torch.bool, device=dev)
         self.grasp_event = torch.zeros(N, dtype=torch.bool, device=dev)
         self.drop_event = torch.zeros(N, dtype=torch.bool, device=dev)
+        self.deliver_event = torch.zeros(N, dtype=torch.bool, device=dev)  # one-shot: first delivered step
+        self._delivered = torch.zeros(N, dtype=torch.bool, device=dev)     # latch: delivered this episode
+        self._ever_grasped = torch.zeros(N, dtype=torch.bool, device=dev)  # latch: grasped >=1x this episode (no-grasp timeout)
         # Idle/stuck detector (see stuck_timeout termination): consecutive idle steps + prev base xy.
         self._stuck_steps = torch.zeros(N, device=dev)
         self._prev_base_xy = torch.zeros(N, 2, device=dev)
+        # Carry-regress detector: consecutive holding steps with no progress toward the goal zone.
+        self._carry_regress_steps = torch.zeros(N, device=dev)
+        self._prev_carry_dist = torch.zeros(N, device=dev)
+        # Reset-to-checkpoint (num_envs==1): a saved sim_state blob + the closest 2m ring captured.
+        self._ckpt_valid = torch.zeros(N, dtype=torch.bool, device=dev)
+        self._ckpt_ring = torch.zeros(N, device=dev)
+        self._checkpoint = None   # recording.sim_state blob for env 0
         # Curriculum 4-stage manager (env.curriculum). Default STAGE_FULL = legacy full chain.
         # P3/P5 drive transitions via set_stage()/set_goal_alpha(); P4 provides the mechanism only.
         from env.curriculum import STAGE_FULL
@@ -543,6 +621,8 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         # Stage 1 (Nav-only) spawns the box already held; the physical pre-grasp (snap+weld) is
         # applied in _pregrasp_box after the scene reset. All other stages start not-holding.
         self.holding[env_ids] = stage_is_pregrasped(self.stage)
+        self._delivered[env_ids] = False   # clear the per-episode delivery latch
+        self._ever_grasped[env_ids] = self.holding[env_ids]  # pregrasped counts as grasped (no timeout)
 
     def _randomize_box_poses(self, env_ids: torch.Tensor) -> None:
         """Random x,y jitter for the 18 bottom-shelf boxes within their shelf-deck area.
@@ -575,6 +655,16 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
     def _reset_idx(self, env_ids) -> None:
         """Release held boxes, sample targets+goals, reset scene, randomize, apply stage reset."""
         env_ids_t = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        # Reset-to-checkpoint decision (num_envs==1): a FAILURE reset with a saved checkpoint resumes
+        # from it; success / time-out / no-checkpoint fall through to a fresh spawn. Decide BEFORE the
+        # fresh flow clobbers state; preserve the carried-box target identity to revert after.
+        _do_restore = False
+        _saved_target = None
+        if (self.num_envs == 1 and 0 in env_ids_t.tolist() and bool(self._ckpt_valid[0])
+                and bool(failure_reset(self)[0])):
+            _do_restore = True
+            _saved_target = (self.target_box_name[0], self.box_cat_idx[0].clone(),
+                             self.goal_pos[0].clone(), self.goal_id_buf[0].clone())
         if CARRY_MODE == "physics":
             self._detach_boxes(env_ids_t)   # drop any box welded last episode before re-sampling
         else:
@@ -590,6 +680,22 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         _robot = self.scene["robot"]
         _bidx = _robot.body_names.index("base_link")
         self._prev_base_xy[env_ids_t] = _robot.data.body_pos_w[env_ids_t, _bidx, :2]
+        self._carry_regress_steps[env_ids_t] = 0.0
+        self._prev_carry_dist[env_ids_t] = torch.norm(
+            self.box_pos[env_ids_t, :2] - self.goal_pos[env_ids_t, :2], dim=-1
+        )
+        self._reanchor_arm(env_ids_t)   # active arm: re-home the EE target/smooth buffers at spawn
+        # Fresh spawn just ran for ALL envs (a valid baseline). For a checkpoint restore, overwrite
+        # env-0 with the saved state; if it throws, the env stays in the fresh spawn (fail-safe).
+        if self.num_envs == 1 and 0 in env_ids_t.tolist():
+            if _do_restore:
+                try:
+                    self._restore_checkpoint_env0(_saved_target)
+                except Exception as _e:   # bad checkpoint -> drop it, keep the fresh spawn
+                    self._ckpt_valid[0] = False
+                    print(f"[checkpoint] restore failed ({_e}); fresh spawn", flush=True)
+            else:
+                self._ckpt_valid[0] = False   # fresh episode -> no checkpoint until it grasps again
 
     def _refresh_target_box_pos(self, env_ids: torch.Tensor | None = None) -> None:
         """Write each env's commanded box xyz (env-local) into self.box_pos."""
@@ -630,27 +736,187 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
             device=self.device,
         )
         newly = grasp_success(ee_world, box_world, closed, box_half) & (~self.holding)
-        # Once grabbed, the box is welded to the chassis and rides up to the carry anchor (away from
-        # the frozen hand), so the geometric grasp_lost would false-trigger. A welded box can't
-        # drift — release it ONLY when the gripper opens.
-        lost = (~closed) & self.holding
+        # "Nyantol": the box is FixedJoint-welded to base_link AT THE HAND and the arm freezes at the
+        # grab pose, so it rides with the robot and CANNOT fall via gripper-open (that release is
+        # removed). The only loss is the safety: a held box that SEPARATED from the hand surface
+        # (weld broke — physics anomaly) = a true drop → reset. grasp_lost is valid now because the
+        # box is snapped to the hand (_grip_anchor_world = panda_hand), not a separate carry anchor.
+        in_zone = self._box_in_any_zone()
+        box_fell = grasp_lost(self.holding, ee_world, box_world, box_half)
         self.grasp_event = newly
-        self.drop_event = lost & (~self._box_in_any_zone())
-        self.holding = (self.holding | newly) & (~lost)
+        self.drop_event = box_fell & (~in_zone)
+        self.holding = (self.holding | newly) & (~box_fell)
+        self._ever_grasped = self._ever_grasped | newly   # latch for the no-grasp timeout
+        # Active arm: snapshot the arm pose at the instant of grab so the carry can freeze the hand
+        # exactly where the box was welded to base_link (else the hand drifts off the welded box).
+        if bool(newly.any()) and getattr(self, "_arm_ready", False):
+            self._arm_freeze_pose[newly] = robot.data.joint_pos[:, self._arm_joint_ids][newly]
+        # Delivery: box (still held) sits in its commanded zone. One-shot the first such step so
+        # consumers (record summary, P3) get a clean event; latch _delivered so it fires only once.
+        delivered_now = self.holding & in_zone
+        self.deliver_event = delivered_now & (~self._delivered)
+        self._delivered = self._delivered | delivered_now
         anchor = self._grip_anchor_world()   # carry point in front of + above the chassis
         if CARRY_MODE == "physics":
-            self._apply_physics_grasp(newly, lost, anchor)
+            self._apply_physics_grasp(newly, box_fell, anchor)
         else:
             # Hidden-kinematic carry: on grab HIDE the box + DISABLE its collision (so the box that
             # follows the robot doesn't ram the racks) — no render, no physics push, cheaper; on
             # release show it + re-enable collision. Then teleport held boxes to follow the robot.
             grabbed = torch.nonzero(newly, as_tuple=False).flatten()
-            dropped = torch.nonzero(lost, as_tuple=False).flatten()
+            dropped = torch.nonzero(box_fell, as_tuple=False).flatten()
             self._set_box_visibility(grabbed, visible=False)
             self._set_box_collision(grabbed, enabled=False)
             self._set_box_visibility(dropped, visible=True)
             self._set_box_collision(dropped, enabled=True)
             self._carry_held_boxes(anchor)
+
+    # ── Active arm (Lane B): manual absolute-hold IK + clamp stack (ports drive_env_v2.py) ──
+    def _ensure_arm_setup(self) -> None:
+        """Lazy one-time setup for the active arm: IK controller, joint/body ids, Jacobian indexing,
+        soft joint limits, shoulder centre, and the per-env target/smooth/freeze buffers."""
+        if getattr(self, "_arm_ready", False):
+            return
+        from isaaclab.utils.math import subtract_frame_transforms
+        robot: Articulation = self.scene["robot"]
+        self._arm_joint_ids, _ = robot.find_joints(
+            [f"panda_joint{i}" for i in range(1, 8)], preserve_order=True
+        )
+        self._arm_home = robot.data.default_joint_pos[:, self._arm_joint_ids].clone()
+        self._ee_idx = robot.body_names.index("panda_hand")
+        self._base_idx = robot.body_names.index("base_link")
+        self._sh_idx = robot.body_names.index("panda_link0")
+        # Jacobian columns: a welded floating base still reports a 6-col base block (see drive_env_v2).
+        jac = robot.root_physx_view.get_jacobians()
+        floating = jac.shape[-1] == robot.num_joints + 6
+        self._jac_joint_ids = (
+            [i + 6 for i in self._arm_joint_ids] if floating else list(self._arm_joint_ids)
+        )
+        self._ee_jacobi_idx = self._ee_idx if floating else self._ee_idx - 1
+        # Soft joint limits (centred fraction of the hard USD range): the IK output is clamped to
+        # these (the controller does not clamp its own), so an unreachable target can't drive joints
+        # past range and oscillate.
+        jlim = robot.data.joint_pos_limits[:, self._arm_joint_ids]      # (N,7,2) [min,max]
+        j_mid = 0.5 * (jlim[..., 0] + jlim[..., 1])
+        j_half = 0.5 * (jlim[..., 1] - jlim[..., 0])
+        self._arm_jmin = j_mid - j_half * ARM_JOINT_MARGIN
+        self._arm_jmax = j_mid + j_half * ARM_JOINT_MARGIN
+        # IK controller: top-down pose, ABSOLUTE mode, DLS — matches drive_env_v2 --orient down.
+        self._arm_ik = DifferentialIKController(
+            DifferentialIKControllerCfg(
+                command_type="pose", use_relative_mode=False, ik_method="dls",
+                ik_params={"lambda_val": ARM_IK_DAMP},
+            ),
+            num_envs=self.num_envs, device=self.device,
+        )
+        self._arm_ik.reset()
+        # Per-env buffers. EE target + desired quat held in the base_link frame (the MOVING chassis),
+        # re-expressed to the root frame each step so the target rides with the robot (#1268 fix).
+        base_pos_w = robot.data.body_pos_w[:, self._base_idx]
+        base_quat_w = robot.data.body_quat_w[:, self._base_idx]
+        ee_pos_b, ee_quat_b = subtract_frame_transforms(
+            base_pos_w, base_quat_w,
+            robot.data.body_pos_w[:, self._ee_idx], robot.data.body_quat_w[:, self._ee_idx],
+        )
+        sh_pos_b, _ = subtract_frame_transforms(
+            base_pos_w, base_quat_w,
+            robot.data.body_pos_w[:, self._sh_idx], robot.data.body_quat_w[:, self._sh_idx],
+        )
+        self._arm_center_b = sh_pos_b.clone()
+        self._ee_target = ee_pos_b.clone()
+        self._ee_quat_des = ee_quat_b.clone()
+        self._arm_smooth = robot.data.joint_pos[:, self._arm_joint_ids].clone()
+        self._arm_freeze_pose = self._arm_smooth.clone()
+        self._arm_ready = True
+
+    def _reanchor_arm(self, env_ids: torch.Tensor) -> None:
+        """Re-anchor the active-arm buffers for reset envs to the current (spawn) pose so the next
+        episode's first command doesn't jump. No-op before the first _ensure_arm_setup."""
+        if not getattr(self, "_arm_ready", False) or env_ids.numel() == 0:
+            return
+        from isaaclab.utils.math import subtract_frame_transforms
+        robot: Articulation = self.scene["robot"]
+        base_pos_w = robot.data.body_pos_w[:, self._base_idx]
+        base_quat_w = robot.data.body_quat_w[:, self._base_idx]
+        ee_pos_b, ee_quat_b = subtract_frame_transforms(
+            base_pos_w, base_quat_w,
+            robot.data.body_pos_w[:, self._ee_idx], robot.data.body_quat_w[:, self._ee_idx],
+        )
+        cur = robot.data.joint_pos[:, self._arm_joint_ids]
+        self._ee_target[env_ids] = ee_pos_b[env_ids]
+        self._ee_quat_des[env_ids] = ee_quat_b[env_ids]
+        self._arm_smooth[env_ids] = cur[env_ids]
+        self._arm_freeze_pose[env_ids] = cur[env_ids]
+
+    def _drive_arm(self, ee_delta: torch.Tensor) -> None:
+        """Active-arm control for stage >= 2 (ports scripts/drive_env_v2.py). Sets arm joint position
+        targets only; the PD tracks them across the step's decimation substeps.
+
+        NOT holding: accumulate the EE delta (base frame) into the absolute hold target; clamp (reach
+        box + leash + radial); solve top-down pose IK re-expressed base->root (the #1268 ride-with-base
+        fix); clamp joints to soft limits; EXP-smooth; cap the per-step joint delta. HOLDING: hold the
+        grab-pose snapshot — the box is FixedJoint-welded to base_link at grab, so the hand must stay.
+        """
+        from isaaclab.utils.math import combine_frame_transforms, subtract_frame_transforms
+        self._ensure_arm_setup()
+        robot: Articulation = self.scene["robot"]
+        held = self.holding
+        free = ~held
+        if bool(free.any()):                                   # held envs keep their frozen target
+            self._ee_target[free] = self._ee_target[free] + ee_delta[free]
+        self._ee_target[..., 0] = self._ee_target[..., 0].clamp_min(ARM_REACH_X_BACK)
+        self._ee_target[..., 2] = self._ee_target[..., 2].clamp(ARM_REACH_Z_MIN, ARM_REACH_Z_MAX)
+        base_pos_w = robot.data.body_pos_w[:, self._base_idx]
+        base_quat_w = robot.data.body_quat_w[:, self._base_idx]
+        ee_now_b, _ = subtract_frame_transforms(
+            base_pos_w, base_quat_w,
+            robot.data.body_pos_w[:, self._ee_idx], robot.data.body_quat_w[:, self._ee_idx],
+        )
+        if ARM_LEAD_M > 0.0:                                   # leash: target leads live EE by <= lead
+            lead = self._ee_target - ee_now_b
+            n = torch.norm(lead, dim=-1, keepdim=True)
+            self._ee_target = ee_now_b + lead * (n.clamp(max=ARM_LEAD_M) / n.clamp_min(1e-6))
+        if ARM_REACH_R > 0.0:                                  # radial workspace clamp around shoulder
+            v = self._ee_target - self._arm_center_b
+            r = torch.norm(v, dim=-1, keepdim=True).clamp_min(1e-6)
+            self._ee_target = self._arm_center_b + v * (r.clamp(ARM_REACH_RMIN, ARM_REACH_R) / r)
+        # Absolute pose IK: base-relative target -> world -> root frame (rides with the base, #1268).
+        jacobian = robot.root_physx_view.get_jacobians()[:, self._ee_jacobi_idx, :, self._jac_joint_ids]
+        root_w = robot.data.root_pose_w
+        ee_pos_r, ee_quat_r = subtract_frame_transforms(
+            root_w[:, 0:3], root_w[:, 3:7],
+            robot.data.body_pos_w[:, self._ee_idx], robot.data.body_quat_w[:, self._ee_idx],
+        )
+        tgt_pos_w, tgt_quat_w = combine_frame_transforms(
+            base_pos_w, base_quat_w, self._ee_target, self._ee_quat_des
+        )
+        tgt_pos_r, tgt_quat_r = subtract_frame_transforms(
+            root_w[:, 0:3], root_w[:, 3:7], tgt_pos_w, tgt_quat_w
+        )
+        joint_pos = robot.data.joint_pos[:, self._arm_joint_ids]
+        self._arm_ik.set_command(torch.cat([tgt_pos_r, tgt_quat_r], dim=-1))
+        ik_targets = self._arm_ik.compute(ee_pos_r, ee_quat_r, jacobian, joint_pos)
+        ik_targets = torch.clamp(ik_targets, self._arm_jmin, self._arm_jmax)
+        self._arm_smooth = ARM_SMOOTH_BETA * ik_targets + (1.0 - ARM_SMOOTH_BETA) * self._arm_smooth
+        q_cur = robot.data.joint_pos[:, self._arm_joint_ids]
+        targets = q_cur + torch.clamp(self._arm_smooth - q_cur, -ARM_MAX_JOINT_STEP, ARM_MAX_JOINT_STEP)
+        if bool(held.any()):                                   # hold grab pose; re-sync target for clean release
+            targets[held] = self._arm_freeze_pose[held]
+            self._arm_smooth[held] = self._arm_freeze_pose[held]
+            self._ee_target[held] = ee_now_b[held]
+        robot.set_joint_position_target(targets, joint_ids=self._arm_joint_ids)
+
+    def _freeze_held_arm(self) -> None:
+        """Hard-pin held envs' arm to the grab-pose snapshot after the sim step (stability: the box is
+        welded to base_link, so the hand must not drift). Active-arm carry analogue of _freeze_arm."""
+        if not getattr(self, "_arm_ready", False) or not bool(self.holding.any()):
+            return
+        robot: Articulation = self.scene["robot"]
+        held = torch.nonzero(self.holding, as_tuple=False).flatten()
+        pose = self._arm_freeze_pose[held]
+        robot.write_joint_state_to_sim(
+            pose, torch.zeros_like(pose), joint_ids=self._arm_joint_ids, env_ids=held
+        )
 
     def _freeze_arm(self) -> None:
         """Kinematically pin the 7 arm joints to their home pose each step (rigid scenery).
@@ -681,6 +947,56 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         self._stuck_steps = torch.where(
             idle, self._stuck_steps + 1.0, torch.zeros_like(self._stuck_steps)
         )
+
+    def _update_carry_progress(self) -> None:
+        """Count consecutive HOLDING steps where the box gets no closer to its goal zone (backing up
+        / dawdling). Resets on progress (> CARRY_PROGRESS_EPS_M closer) or when not holding. Drives
+        carry_regress_penalty so the robot doesn't reverse forever on the way to the finish zone."""
+        cur = torch.norm(self.box_pos[:, :2] - self.goal_pos[:, :2], dim=-1)
+        progressed = cur < (self._prev_carry_dist - CARRY_PROGRESS_EPS_M)
+        stalling = self.holding & (~progressed)   # only while carrying; approach phase never counts
+        self._carry_regress_steps = torch.where(
+            stalling, self._carry_regress_steps + 1.0, torch.zeros_like(self._carry_regress_steps)
+        )
+        self._prev_carry_dist = cur
+
+    def _update_checkpoint(self) -> None:
+        """Snapshot the sim state (env 0) while carrying — at grasp and each closer CHECKPOINT_RING_M
+        ring to the goal. Restored on a failure reset so the next episode resumes near the goal.
+        num_envs==1 only (reuses recording.sim_state, which is env-0 scoped)."""
+        if self.num_envs != 1 or not bool(self.holding[0]):
+            return
+        dist = float(torch.norm(self.box_pos[0, :2] - self.goal_pos[0, :2]))
+        ring = int(dist // CHECKPOINT_RING_M)
+        if bool(self._ckpt_valid[0]) and ring >= int(self._ckpt_ring[0]):
+            return   # no new (closer) ring reached
+        from recording.sim_state import capture_sim_state
+        self._checkpoint = capture_sim_state(self)
+        self._ckpt_valid[0] = True
+        self._ckpt_ring[0] = ring
+
+    def _restore_checkpoint_env0(self, saved_target: tuple) -> None:
+        """Overwrite env-0 with the saved checkpoint AFTER the normal fresh reset ran (so a failure
+        here degrades to a valid fresh spawn). Reverts the resampled target to the carried box,
+        restores joints+box+holding, re-welds the box, and re-arms the active-arm freeze pose."""
+        from recording.sim_state import restore_sim_state
+        name, cat, goal, gid = saved_target
+        self.target_box_name[0] = name
+        self.box_cat_idx[0] = cat
+        self.goal_pos[0] = goal
+        self.goal_id_buf[0] = gid
+        restore_sim_state(self, self._checkpoint)        # joints (base+arm) + box pose + holding
+        self._ever_grasped[0] = True
+        ids0 = torch.tensor([0], device=self.device)
+        if CARRY_MODE == "physics":                       # re-weld the carried box at its restored pose
+            box = self.scene[name]
+            self._attach_boxes(ids0, box.data.root_pos_w[0:1])
+            self._set_box_collision(ids0, enabled=False)
+        else:
+            self._set_box_visibility(ids0, visible=False)
+            self._set_box_collision(ids0, enabled=False)
+        if getattr(self, "_arm_ready", False):            # active-arm carry freezes at the grab pose
+            self._arm_freeze_pose[0] = self._checkpoint["joint_pos"][0, self._arm_joint_ids]
 
     def _box_in_any_zone(self) -> torch.Tensor:
         """(N,) bool: target box xy within 1.5 m of its commanded zone center (env-local)."""
@@ -914,10 +1230,11 @@ class WarehouseGymEnv(gym.Env):
                  arm_active: bool = False):
         """Build underlying RL env and Gym-style spaces.
 
-        arm_active=False (default, TRAINING): the arm is frozen each step — EE action channels are
-        ignored and the joints are pinned to home, so the policy learns base + grasp-proximity only
-        (stable, no drift/flail). arm_active=True (TELEOP, e.g. drive_env): the EE delta drives the
-        Franka via DifferentialIK so the arm can be moved/tested. See Jalan A decision 2026-06-22.
+        Arm control is STAGE-GATED (Lane B, 2026-06-22): stage >= 2 (grasp/full/anneal) drives the
+        arm via WarehouseRLEnv._drive_arm (absolute-hold EE target + clamp stack, ported from the
+        verified drive_env_v2.py); stage 1 (pre-grasped nav) keeps the arm frozen at home. Set
+        arm_active=True to FORCE the active arm regardless of stage (e.g. drive_env teleop). The
+        external (6,) action and obs dict are unchanged either way.
         """
         self.cfg = cfg if cfg is not None else WarehouseEnvCfg()
         self.arm_active = arm_active
@@ -1010,20 +1327,38 @@ class WarehouseGymEnv(gym.Env):
         if action.ndim == 1:
             action = action.unsqueeze(0).expand(self.num_envs, -1)
         action = action.clamp(-1.0, 1.0).to(self.device, dtype=torch.float32)
+        from env.curriculum import STAGE_GRASP
         base2, ee3, grip1 = split_action(action)
-        # Jalan A (2026-06-22): arm frozen for TRAINING (stable, no drift/flail), active for TELEOP.
-        #   arm_active=False → zero the EE channels so the IK term is a no-op, then _freeze_arm()
-        #     pins the joints to home. Policy learns base + grasp-proximity only.
-        #   arm_active=True  → ee3 flows to DifferentialIK so the Franka can be driven (drive_env).
-        if not self.arm_active:
-            ee3 = torch.zeros_like(ee3)
         base3 = self._base_cmd(base2)                       # (N,3) base joint velocities
-        internal = torch.cat([base3, ee3, grip1], dim=-1)   # (N,7) base(3)+ik(3)+gripper(1)
+        internal = torch.cat([base3, grip1], dim=-1)        # (N,4) base(3)+gripper(1); arm driven manually
+        # Lane B (2026-06-22): ACTIVE arm for stage >= 2 (grasp needs it) or an explicit arm_active
+        # override; FROZEN for stage 1 (pre-grasped nav — isolates carry from arm motion). _drive_arm
+        # sets the arm joint targets BEFORE the step (the PD tracks them across the decimation substeps);
+        # _freeze_held_arm hard-pins held envs after (box welded to base_link, hand must not drift).
+        active_arm = self.arm_active or self._env.stage >= STAGE_GRASP
+        if active_arm:
+            self._env._drive_arm(ee3)
         obs, reward, terminated, truncated, info = self._env.step(internal)
-        if not self.arm_active:
-            self._env._freeze_arm()                         # pin arm to home (no drift/flail)
+        if active_arm:
+            self._env._freeze_held_arm()                    # carry: pin held envs' arm to the grab pose
+        else:
+            self._env._freeze_arm()                         # frozen training: pin arm to home
         self._env.update_grasp()                            # holding + grasp/drop events, carry box
         self._env._update_stuck()                           # idle detector for stuck_timeout reset
+        self._env._update_carry_progress()                  # backing-up-from-zone detector
+        self._env._update_checkpoint()                      # snapshot for reset-to-checkpoint
+        # Surface the one-shot task events so consumers (recorder summary, P3 buffer) don't have to
+        # reach into ._env. info gains 3 (N,) bool tensors; the (obs,r,term,trunc,info) shape is unchanged.
+        if isinstance(info, dict):
+            info["grasp_event"] = self._env.grasp_event
+            info["drop_event"] = self._env.drop_event
+            info["deliver_event"] = self._env.deliver_event
+            # Reward tracking: weighted per-term breakdown (env 0) + total, so any trainer/recorder
+            # can log WHICH term drives the step. Reuses env.reward_debug (also used by drive_env).
+            from env.reward_debug import reward_breakdown
+            terms = reward_breakdown(self._env)
+            info["reward_terms"] = terms
+            info["reward_total"] = sum(v for v in terms.values() if v == v)  # skip NaN
         return self._unwrap_obs(obs), reward, terminated, truncated, info
 
     def render(self):

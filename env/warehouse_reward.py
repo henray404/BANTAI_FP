@@ -120,3 +120,92 @@ def out_of_bounds(
     """Termination: True if robot leaves the rectangular room interior."""
     xy = _robot_xy(env, asset_cfg)
     return (xy[:, 0].abs() > half_extent_x) | (xy[:, 1].abs() > half_extent_y)
+
+
+# ── Failure resets + penalties (2026-06-23) ───────────────────────────
+# A real CRASH (reset) uses a higher force than the soft per-step collision penalty: a brush (5N)
+# is penalised but tolerated; a crash (>= COLLIDE_RESET_N) ends the episode.
+COLLIDE_RESET_N = 50.0
+# Rack footprint half-extents (m) for "under/inside a rack" detection. RACK_COLLIDER_SIZE is
+# ~1.2x0.9; halves 0.6x0.45 padded a little so grazing the frame counts.
+RACK_HALF_X = 0.70
+RACK_HALF_Y = 0.55
+NO_GRASP_TIMEOUT_STEPS = 300   # 30 s @ 10 Hz with no grasp -> reset (arm-first focus)
+
+
+def _contact_force(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Max net contact-force magnitude on the chassis bodies, shape (num_envs,)."""
+    sensor: ContactSensor = env.scene[sensor_cfg.name]
+    return sensor.data.net_forces_w_history[:, 0, :, :].norm(dim=-1).amax(dim=-1)
+
+
+def collided(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_sensor"),
+    threshold_n: float = COLLIDE_RESET_N,
+) -> torch.Tensor:
+    """Termination: chassis contact force above the CRASH threshold (auto-reset on nabrak)."""
+    return _contact_force(env, sensor_cfg) > threshold_n
+
+
+def _rack_xy(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Cached (R,2) tensor of env-local rack centres — only the SPAWNED racks (ACTIVE_RACK_POSITIONS
+    honours scene.num_boxes), so under-rack never penalises an empty position."""
+    if not hasattr(env, "_rack_xy_buf"):
+        try:
+            from env.warehouse_scene import ACTIVE_RACK_POSITIONS as _racks
+        except Exception:
+            from env.layout_grid import RACK_POSITIONS as _racks
+        env._rack_xy_buf = torch.tensor(
+            [[x, y] for (x, y, _z) in _racks], device=env.device, dtype=torch.float32
+        )
+    return env._rack_xy_buf
+
+
+def under_rack(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    half_x: float = RACK_HALF_X,
+    half_y: float = RACK_HALF_Y,
+) -> torch.Tensor:
+    """(N,) bool: robot chassis xy inside ANY rack footprint (drove under/into a rack)."""
+    xy = _robot_xy(env, asset_cfg)                       # (N,2) env-local
+    racks = _rack_xy(env)                                # (R,2) env-local
+    dx = (xy[:, None, 0] - racks[None, :, 0]).abs()
+    dy = (xy[:, None, 1] - racks[None, :, 1]).abs()
+    return ((dx < half_x) & (dy < half_y)).any(dim=-1)   # (N,)
+
+
+def under_rack_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    half_x: float = RACK_HALF_X,
+    half_y: float = RACK_HALF_Y,
+) -> torch.Tensor:
+    """-1 per step while under a rack (use with POSITIVE weight, like collision_penalty).
+
+    Explicit params (no **kwargs) — Isaac's manager introspects the signature and rejects *kw.
+    """
+    return -under_rack(env, asset_cfg=asset_cfg, half_x=half_x, half_y=half_y).float()
+
+
+def no_grasp_timeout(
+    env: ManagerBasedRLEnv,
+    timeout_steps: int = NO_GRASP_TIMEOUT_STEPS,
+) -> torch.Tensor:
+    """Termination: still no grasp after timeout_steps and not holding (forces the arm-first task).
+
+    Skips envs that have ever grasped this episode (env._ever_grasped) so a robot that grasped then
+    is mid-carry/redelivering is not aborted.
+    """
+    if not (hasattr(env, "holding") and hasattr(env, "episode_length_buf")):
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    # Only the grasp-isolation stage (Stage 2, spawn-near-box) enforces this — full-chain stages
+    # (3/4) need the time to NAVIGATE to the box first, so a 30s grasp deadline would reset them
+    # prematurely. Stage 1 is pregrasped (ever_grasped=True) so it never fires there anyway.
+    from env.curriculum import stage_is_spawn_near_box
+    if not stage_is_spawn_near_box(getattr(env, "stage", 0)):
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    ever = getattr(env, "_ever_grasped", None)
+    never = (~ever) if ever is not None else torch.ones_like(env.holding)
+    return (env.episode_length_buf >= timeout_steps) & (~env.holding) & never
