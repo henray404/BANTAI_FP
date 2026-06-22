@@ -1,0 +1,9 @@
+# requirements-colab.txt — deps for OFFLINE training on Google Colab (A100).
+#
+# Colab already ships torch+CUDA (works on A100), numpy, and tensorboard. Do NOT
+# reinstall torch — Colab's build matches its driver. The offline path
+# (scripts/train_offline.py) avoids the env entirely, so NO gym / gymnasium /
+# isaaclab / einops is needed. Only the NM512 config loader needs ruamel.yaml.
+#
+#   pip install -r requirements-colab.txt
+ruamel.yaml>=0.17.4
