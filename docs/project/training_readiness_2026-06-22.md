@@ -20,6 +20,7 @@ Code/config fixes that needed no Isaac run (verified standalone). What's done vs
 | **C2 / flaw-6 — `time_pen` suicide incentive** | `configs/reward_weights.yaml`: `time_pen -0.05 → -0.005` (with a warning comment). | ✅ yaml loads |
 | **flaw-1 — reward triple-source drift (2 of 3)** | `configs/env_config.yaml` `reward:` section now banners **⚠️ NOT LOADED — see reward_weights.yaml**. `reward_weights.yaml` is the single live source. | ✅ |
 | **Jalan A wiring** | `WarehouseGymEnv(arm_active=False)` default → arm frozen for ALL training entries; `drive_env` passes `arm_active=True`. | ✅ parses, wiring confirmed |
+| **Debug tooling (instead of a GUI — see council)** | New `env/reward_debug.py` (per-step reward breakdown); `drive_env --debug_reward` prints it. Live training curves = **TensorBoard** (`tensorboard --logdir training/results/dreamerv3`, already wired). No custom GUI built — it would duplicate the YAMLs/CLI and not address the real bottleneck (slow sim runs). | ✅ self-check passes |
 
 **Could NOT fix (and why):**
 - **flaw-1, 3rd source:** `CLAUDE.md` reward block is still stale — that file is **write-protected** for agents. *You* must update it manually (point it at `reward_weights.yaml`).
@@ -84,8 +85,10 @@ python scripts/train_dreamer.py --num_envs 1 --headless --stage 2
 ### Step 2 — Confirm grasp can fire with frozen arm (B2)
 Teleop, arm active, drive the BASE to a box and close the gripper (you do NOT need the arm for the grasp — it's proximity):
 ```bash
-python scripts/drive_env.py
+python scripts/drive_env.py --debug_reward
 ```
+`--debug_reward` prints the per-step reward breakdown (`[reward] approach=-0.31 grasp=+0.00 ... TOTAL=`)
+~1/s so you SEE which term drives the step — does grasp fire, is `approach` shrinking as you near the box.
 - Drive base up to a box (arrows), press **K** to close gripper.
 - **Pass:** `holding=1` prints. Grasp-proximity works → training can learn it.
 - **Fail:** `holding` stays 0 no matter how close → grasp threshold / hand offset is wrong. Flag it; we fix `grasp` proximity radius or the frozen home offset.
@@ -172,7 +175,7 @@ verified on Track A. Work both tracks at once.
 | A3 | **Camera render check** (B3): `drive_env --cam 30`, inspect `_cam_debug/` | — | onboard frames look right |
 | A4 | **Home-pose retune** (`env_config robot.home_joint_pos`) IF A2 shows the hand can't reach | A2 | hand sits over the front-floor box |
 | A5 | **Sanity run + watch metrics** (`--steps 20000`): `grasp` reward > 0, return trends up | A1, reward fixes | grasp fires within ~5k post-prefill |
-| A6 | **W&B install + login** (optional) | — | dashboard logs, or keep stdout |
+| A6 | **Live metrics: TensorBoard** (already wired — vendor writes `SummaryWriter` + `metrics.jsonl`): `tensorboard --logdir training/results/dreamerv3` → watch `grasp`/return live. NO install of W&B needed for the dreamer path. (W&B via `training/logger.py` only matters for the SAC/PPO baseline `train_p3`.) | A1 | graphs open in browser |
 
 ## Track B — ANY laptop (no Isaac; unit-test locally, verify later on A)
 | ID | Task | File(s) | Testable w/o Isaac |

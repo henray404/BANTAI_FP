@@ -53,6 +53,9 @@ parser.add_argument("--chase_height", type=float, default=4.0,
 parser.add_argument("--log", type=str, default="",
                     help="Write a per-step diagnostic CSV to this path (relative to project root). "
                          "Empty = off. Captures action, ee_pos, base roll/pitch/yaw, gripper, holding.")
+parser.add_argument("--debug_reward", action="store_true",
+                    help="Print the per-step reward breakdown (which term drives the step reward) ~1/s. "
+                         "Use to SEE why return is what it is — does grasp fire, is approach shrinking.")
 AppLauncher.add_app_launcher_args(parser)
 # Teleop sensitivities are tunable in configs/teleop.yaml — load them as argparse defaults so a
 # CLI flag still wins, the YAML overrides the baked-in fallbacks, and editing the file needs no
@@ -220,6 +223,9 @@ def main() -> None:
             act = [round(float(v), 3) for v in action[0].tolist()]
             if any(abs(v) > 1e-6 for v in act) or hold:
                 print(f"[drive_env] action={act}  ee_pos={ee} gripper={grip} holding={hold} box={box}")
+            if args_cli.debug_reward:
+                from env.reward_debug import reward_breakdown, format_breakdown
+                print("           " + format_breakdown(reward_breakdown(env._env)))
         step += 1
 
     if log_f is not None:
