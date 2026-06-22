@@ -15,8 +15,13 @@ DELIVER_RADIUS_M = 1.5  # box within this xy-distance of the goal zone center = 
 
 
 def approach_box_distance(env) -> torch.Tensor:
-    """Phase A dense: distance(ee, box), zero while holding (use with negative weight)."""
-    d = torch.norm(env.ee_pos - env.box_pos, dim=-1)
+    """Phase A dense: distance(ee, box), zero while holding (use with negative weight).
+
+    Uses env.ee_pos_world (env-local world), NOT env.ee_pos (base-frame delta) — both ee and box
+    must be in the SAME frame or the distance never shrinks on approach (dead gradient). See C1 in
+    docs/project/training_readiness_2026-06-22.md.
+    """
+    d = torch.norm(env.ee_pos_world - env.box_pos, dim=-1)
     return torch.where(env.holding, torch.zeros_like(d), d)
 
 

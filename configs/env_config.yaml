@@ -40,6 +40,20 @@ robot:
   action_scale: 1.0         # _base_cmd emits joint velocity targets directly
   spawn_x: [-8.0, 8.0]      # receiving-north x range
   spawn_y: [11.0, 14.0]     # receiving-north y range
+  # Arm home/rest pose — panda_joint1..7 in RADIANS. The arm spawns here, relative-IK anchors from
+  # it, and _freeze_arm holds it. LOADED LIVE (env/warehouse_scene._apply_home_pose_override).
+  # Current = tucked pose (hand folds BACK toward base — why the arm looks like it works "behind").
+  # To reach FORWARD + DOWN over front boxes: unfold the elbow (joint4 less negative, e.g. -2.0) and
+  # tilt the shoulder forward (joint2 ~0.2-0.4), keep joint6 high so the hand points down. Edit one
+  # joint at a time and VERIFY in sim (drive_env / explore_scene) — bad angles break the grasp.
+  home_joint_pos:
+    panda_joint1: 0.0
+    panda_joint2: -0.569    # forward-down try: 0.3
+    panda_joint3: 0.0
+    panda_joint4: -2.810    # forward-down try: -2.0  (less folded = reaches further forward)
+    panda_joint5: 0.0
+    panda_joint6: 2.0       # forward-down try: 2.3      (keep hand pointing down)
+    panda_joint7: 0.741
   # VERIFY on first run: base prismatic frame (world vs body — run smoke_test.py);
   #   chassis BODY name for contact sensor (currently guessed "base_link"); VRAM on 8GB.
   articulation:
@@ -79,7 +93,10 @@ action:
   # External (6,) -> internal (7,) joint action: base_vel(3) + arm_ik(3) + gripper(1).
   ee_step_m: 0.05   # EE Cartesian travel per control step at action==1.0
 
-reward:   # staged pick-place (switches on holding); see spec §4
+# ⚠️ NOT LOADED — documentation only. The LIVE reward/penalty weights are in
+# configs/reward_weights.yaml (loaded by env/warehouse_env._load_reward_weights). Editing the
+# values below has NO effect. Kept here only as a human-readable description; tune the other file.
+reward:   # staged pick-place (switches on holding); see spec §4 — NOT LOADED, see reward_weights.yaml
   approach_weight: -0.01      # Phase A dense: -dist(ee, box), gated off while holding
   grasp_success: 5.0          # +5 one-shot when box gripped + lifted
   carry_weight: -0.01         # Phase B dense: -dist(box, zone), active while holding

@@ -39,6 +39,10 @@ parser.add_argument("--visual_her", action="store_true",
                     help="Enable Visual HER episode relabeling (configs #5, #6).")
 parser.add_argument("--config", type=str, default=None,
                     help="Path to experiments/ablation.yaml (tunable hyperparameters).")
+parser.add_argument("--stage", type=int, default=3,
+                    help="Curriculum stage 1-4 (1=nav/pre-grasped, 2=grasp/spawn-near-box, "
+                         "3=full chain [default], 4=full+goal-anneal). Fixed for the run — the "
+                         "vendor loop does not auto-advance. Start at 2 to isolate approach+grasp.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True
@@ -77,6 +81,11 @@ def _build_shared_env():
         cfg = WarehouseEnvCfg()
         cfg.scene.num_envs = 1
         raw = WarehouseGymEnv(cfg=cfg)
+        # Curriculum stage (fixed for the run; vendor loop has no success-gate to auto-advance).
+        # set_stage validates 1-4 and applies on the next reset (the dreamer loop resets before
+        # stepping). _env is the underlying WarehouseRLEnv exposing the curriculum API.
+        raw._env.set_stage(args_cli.stage)
+        print(f"[curriculum] stage fixed at {args_cli.stage}", flush=True)
         _SHARED_ENV["success"] = raw
         if args_cli.ca_slope:
             cs = _SETTINGS.ca_slope
@@ -96,7 +105,18 @@ def _build_shared_env():
 def main() -> None:
     """Patch the vendor make_env and run NM512's Dreamer training loop."""
     add_vendor_to_path()
-    import dreamer  # vendored top-level entry module
+    # The vendor uses bare `import models` (NM512 runs from its own dir). The project `models`
+    # package is already in sys.modules (models.dreamerv3.*) and shadows vendor/models.py, so the
+    # vendor's `import models` returns the project package (no WorldModel). Temporarily evict the
+    # project `models.*` entries so `import dreamer` binds the vendor module globals to vendor/*.py
+    # (sys.path[0]), then restore them — later code (make_warehouse_dreamer) still does
+    # `from models.dreamerv3.config import ...` and needs the project package back.
+    _saved = {k: sys.modules.pop(k)
+              for k in [m for m in sys.modules if m == "models" or m.startswith("models.")]}
+    try:
+        import dreamer  # vendored top-level entry module; binds its `models` -> vendor/models.py
+    finally:
+        sys.modules.update(_saved)
 
     # Visual HER (configs #5, #6): inject relabeled episodes into the train cache.
     if args_cli.visual_her:

@@ -221,6 +221,32 @@ RIDGEBACK_FRANKA_CFG = ArticulationCfg(
 RIDGEBACK_FRANKA_CFG.spawn.func = _spawn_ridgeback_welded
 
 
+def _apply_home_pose_override() -> None:
+    """Override panda_joint1..7 spawn targets from configs/env_config.yaml (robot.home_joint_pos).
+
+    Lets the arm rest/reach pose be retuned in YAML without editing code — the spawn pose, the
+    relative-IK anchor, and _freeze_arm (which reads default_joint_pos) all follow it. Missing
+    file/keys keep the tucked defaults above. Verify any change in sim (teleop / explore_scene).
+    """
+    cfg_path = Path(__file__).resolve().parents[1] / "configs" / "env_config.yaml"
+    if not cfg_path.exists():
+        return
+    text = cfg_path.read_text(encoding="utf-8")
+    try:
+        import yaml
+        data = yaml.safe_load(text) or {}
+    except ImportError:
+        import ruamel.yaml as ryaml
+        data = ryaml.YAML(typ="safe").load(text) or {}
+    home = (data.get("robot") or {}).get("home_joint_pos") or {}
+    for joint, value in home.items():
+        if joint in RIDGEBACK_FRANKA_CFG.init_state.joint_pos:
+            RIDGEBACK_FRANKA_CFG.init_state.joint_pos[joint] = float(value)
+
+
+_apply_home_pose_override()
+
+
 # ── Room Geometry ─────────────────────────────────────────────────────
 ROOM_HALF_X = 10.0   # room width 20 m (x in [-10, +10])
 ROOM_HALF_Y = 15.0   # room depth 30 m (y in [-15, +15])

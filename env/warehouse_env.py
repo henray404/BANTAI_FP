@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import math
+import pathlib
 
 import gymnasium as gym
 import numpy as np
@@ -91,6 +92,11 @@ STUCK_STEPS = 450
 # control steps (~5 s at 10 Hz), apply a per-step cost so STANDING STILL is strictly more expensive
 # than careful movement. Fires long before STUCK_STEPS (the hard reset). See warehouse_reward.idle_penalty.
 IDLE_PENALTY_STEPS = 50
+
+# Heavy "too slow" penalty: a second, steeper idle tier that fires after IDLE_SLOW_STEPS consecutive
+# idle control steps (~30 s at 10 Hz) — escalates above the 5 s soft idle nudge but still before the
+# STUCK_STEPS (~45 s) hard reset, so a robot loitering for half a minute pays a real cost first.
+IDLE_SLOW_STEPS = 300
 
 
 # ── Custom Observation Functions ──────────────────────────────────────
@@ -298,7 +304,55 @@ class EventCfg:
     )
 
 
-# ── Rewards ───────────────────────────────────────────────────────────
+# ── Config loading (tunable YAML in configs/) ─────────────────────────
+_CONFIG_DIR = pathlib.Path(__file__).resolve().parents[1] / "configs"
+_REWARD_CFG_PATH = _CONFIG_DIR / "reward_weights.yaml"
+_ENV_CFG_PATH = _CONFIG_DIR / "env_config.yaml"
+
+
+def _read_yaml(path: pathlib.Path) -> dict:
+    """Parse a YAML file to a dict (pyyaml, ruamel fallback); {} if the file is absent."""
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding="utf-8")
+    try:
+        import yaml
+        return yaml.safe_load(text) or {}
+    except ImportError:
+        import ruamel.yaml as ryaml
+        return ryaml.YAML(typ="safe").load(text) or {}
+
+
+def _load_reward_weights() -> dict:
+    """Return the `rewards:` mapping from configs/reward_weights.yaml ({} if file/section absent).
+
+    Tunable weights live in the YAML so shaping can be tweaked without editing code. Missing file
+    or keys fall back to the RewardsCfg Python defaults (applied in WarehouseEnvCfg.__post_init__).
+    """
+    return _read_yaml(_REWARD_CFG_PATH).get("rewards", {}) or {}
+
+
+def _load_env_config() -> dict:
+    """Return the live-tunable env knobs from configs/env_config.yaml, flattened ({} if absent).
+
+    Only a curated subset of that (otherwise documentation) file is honored — episode length,
+    decimation, sim dt, and base speed. Keys absent from the YAML are dropped so callers keep their
+    Python defaults. Applied in WarehouseEnvCfg.__post_init__.
+    """
+    data = _read_yaml(_ENV_CFG_PATH)
+    env = data.get("env", {}) or {}
+    sim = data.get("simulation", {}) or {}
+    rob = data.get("robot", {}) or {}
+    out = {
+        "decimation": env.get("decimation"),
+        "episode_length_s": env.get("episode_length_s"),
+        "sim_dt": sim.get("dt"),
+        "max_lin_speed": rob.get("max_lin_speed"),
+        "max_ang_speed": rob.get("max_ang_speed"),
+    }
+    return {k: v for k, v in out.items() if v is not None}
+
+
 @configclass
 class RewardsCfg:
     """Staged pick-place reward (see spec §4). Phase switches on env.holding.
@@ -319,7 +373,8 @@ class RewardsCfg:
     deliver   = RewTerm(func=pickup_delivered_reward, weight=10.0)
     time_pen  = RewTerm(func=time_penalty,            weight=-0.005)
     collision = RewTerm(func=collision_penalty,       weight=2.0)   # func returns 0/-1; weight=2 → -2
-    idle      = RewTerm(func=idle_penalty, params={"idle_steps": IDLE_PENALTY_STEPS}, weight=0.02)  # 0/-1 → -0.02
+    idle      = RewTerm(func=idle_penalty, params={"idle_steps": IDLE_PENALTY_STEPS}, weight=0.02)  # 0/-1 → -0.02 @5s
+    idle_slow = RewTerm(func=idle_penalty, params={"idle_steps": IDLE_SLOW_STEPS},    weight=0.1)   # 0/-1 → -0.1 @30s (heavy "too slow")
     drop      = RewTerm(func=drop_penalty,            weight=-2.0)
 
 
@@ -356,11 +411,33 @@ class WarehouseEnvCfg(ManagerBasedRLEnvCfg):
         self.decimation = 20           # 200 Hz / 20 = 10 Hz control (DreamerNav std, saves VRAM)
         self.episode_length_s = 100.0  # 100s x 10Hz = 1000 steps (nav + grasp + carry + place)
         self.sim.dt = 0.005
+        # Live env knobs from configs/env_config.yaml override the defaults just set (missing keys
+        # keep them). Base speed lives in module globals (read at call time in _base_cmd), so update
+        # them here. ponytail: globals are process-wide — fine at num_envs=1, last cfg wins if many.
+        _e = _load_env_config()
+        self.decimation = int(_e.get("decimation", self.decimation))
+        self.episode_length_s = float(_e.get("episode_length_s", self.episode_length_s))
+        self.sim.dt = float(_e.get("sim_dt", self.sim.dt))
+        if "max_lin_speed" in _e:
+            globals()["MAX_LIN_SPEED"] = float(_e["max_lin_speed"])
+        if "max_ang_speed" in _e:
+            globals()["MAX_ANG_SPEED"] = float(_e["max_ang_speed"])
         self.sim.render_interval = self.decimation
         # Arm + contact stability (Ridgeback-Franka): reduce noisy base/arm velocities.
         self.sim.physx.enable_external_forces_every_iteration = True
         self.viewer.eye = (0.0, -20.0, 18.0)
         self.viewer.lookat = (0.0, 0.0, 0.5)
+        # Reward/penalty weights are tunable via configs/reward_weights.yaml — edit + restart to
+        # retune shaping without touching code. Missing file/keys keep the RewardsCfg defaults.
+        _w = _load_reward_weights()
+        for _name in ("approach", "grasp", "carry", "deliver", "time_pen",
+                      "collision", "idle", "idle_slow", "drop"):
+            if _name in _w:
+                getattr(self.rewards, _name).weight = float(_w[_name])
+        if "idle_steps" in _w:
+            self.rewards.idle.params["idle_steps"] = int(_w["idle_steps"])
+        if "idle_slow_steps" in _w:
+            self.rewards.idle_slow.params["idle_steps"] = int(_w["idle_slow_steps"])
 
 
 # ── Custom RL Env ─────────────────────────────────────────────────────
@@ -393,7 +470,8 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         self.box_cat_idx = torch.zeros(N, dtype=torch.long, device=dev)
         self.target_box_name = ["" for _ in range(N)]
         self.box_pos = torch.zeros(N, 3, device=dev)
-        self.ee_pos = torch.zeros(N, 3, device=dev)
+        self.ee_pos = torch.zeros(N, 3, device=dev)        # base-frame delta (proprioception OBS)
+        self.ee_pos_world = torch.zeros(N, 3, device=dev)  # env-local world (REWARD shaping; frame-matches box_pos)
         self.holding = torch.zeros(N, dtype=torch.bool, device=dev)
         self.grasp_event = torch.zeros(N, dtype=torch.bool, device=dev)
         self.drop_event = torch.zeros(N, dtype=torch.bool, device=dev)
@@ -533,6 +611,11 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         base = robot.body_names.index("base_link")
         self.ee_pos = robot.data.body_pos_w[:, ee] - robot.data.body_pos_w[:, base]
         ee_world = robot.data.body_pos_w[:, ee]
+        # ee in env-local world (same frame as box_pos) so the approach reward's distance actually
+        # shrinks as the robot nears the box. self.ee_pos (base-frame delta) is ~constant with the
+        # arm frozen, so reusing it for shaping gave a DEAD gradient — see C1 in
+        # docs/project/training_readiness_2026-06-22.md.
+        self.ee_pos_world = ee_world - self.scene.env_origins
         j = robot.joint_names.index("panda_finger_joint1")
         closed = robot.data.joint_pos[:, j] < 0.0175   # < half of open (0.035)
         # MAGNETIC pickup: the arm is frozen (WarehouseGymEnv.step zeros the EE action), so the
@@ -827,9 +910,17 @@ class WarehouseGymEnv(gym.Env):
 
     metadata = {"render_modes": ["rgb_array"]}
 
-    def __init__(self, cfg: WarehouseEnvCfg | None = None, render_mode: str | None = None):
-        """Build underlying RL env and Gym-style spaces."""
+    def __init__(self, cfg: WarehouseEnvCfg | None = None, render_mode: str | None = None,
+                 arm_active: bool = False):
+        """Build underlying RL env and Gym-style spaces.
+
+        arm_active=False (default, TRAINING): the arm is frozen each step — EE action channels are
+        ignored and the joints are pinned to home, so the policy learns base + grasp-proximity only
+        (stable, no drift/flail). arm_active=True (TELEOP, e.g. drive_env): the EE delta drives the
+        Franka via DifferentialIK so the arm can be moved/tested. See Jalan A decision 2026-06-22.
+        """
         self.cfg = cfg if cfg is not None else WarehouseEnvCfg()
+        self.arm_active = arm_active
         self._env = WarehouseRLEnv(cfg=self.cfg, render_mode=render_mode)
         self.num_envs: int = self._env.num_envs
         self.device = self._env.device
@@ -920,14 +1011,17 @@ class WarehouseGymEnv(gym.Env):
             action = action.unsqueeze(0).expand(self.num_envs, -1)
         action = action.clamp(-1.0, 1.0).to(self.device, dtype=torch.float32)
         base2, ee3, grip1 = split_action(action)
-        # ARM FROZEN: magnetic pickup. The arm holds its tucked/ready pose (zero IK delta) so the
-        # robot never reaches out and KNOCKS the box — it drives up, stops in front, and the box is
-        # grabbed on proximity (see update_grasp). The EE action channels are ignored on purpose.
-        ee3 = torch.zeros_like(ee3)
+        # Jalan A (2026-06-22): arm frozen for TRAINING (stable, no drift/flail), active for TELEOP.
+        #   arm_active=False → zero the EE channels so the IK term is a no-op, then _freeze_arm()
+        #     pins the joints to home. Policy learns base + grasp-proximity only.
+        #   arm_active=True  → ee3 flows to DifferentialIK so the Franka can be driven (drive_env).
+        if not self.arm_active:
+            ee3 = torch.zeros_like(ee3)
         base3 = self._base_cmd(base2)                       # (N,3) base joint velocities
         internal = torch.cat([base3, ee3, grip1], dim=-1)   # (N,7) base(3)+ik(3)+gripper(1)
         obs, reward, terminated, truncated, info = self._env.step(internal)
-        self._env._freeze_arm()                             # pin arm to home pose (no drift/flail)
+        if not self.arm_active:
+            self._env._freeze_arm()                         # pin arm to home (no drift/flail)
         self._env.update_grasp()                            # holding + grasp/drop events, carry box
         self._env._update_stuck()                           # idle detector for stuck_timeout reset
         return self._unwrap_obs(obs), reward, terminated, truncated, info

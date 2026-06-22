@@ -9,7 +9,7 @@ from env.reward_pickup import (
 def _env(**kw):
     base = dict(
         num_envs=1, device="cpu",
-        ee_pos=torch.tensor([[0.0, 0.0, 0.3]]),
+        ee_pos_world=torch.tensor([[0.0, 0.0, 0.3]]),   # approach reward reads env-local world ee
         box_pos=torch.tensor([[0.0, 0.0, 0.3]]),
         holding=torch.tensor([False]),
         goal_pos=torch.tensor([[0.0, -12.0, 0.0]]),
@@ -25,7 +25,7 @@ def test_approach_distance_zero_when_ee_on_box():
 
 
 def test_approach_gated_off_when_holding():
-    e = _env(holding=torch.tensor([True]), ee_pos=torch.tensor([[1.0, 0.0, 0.3]]))
+    e = _env(holding=torch.tensor([True]), ee_pos_world=torch.tensor([[1.0, 0.0, 0.3]]))
     assert torch.allclose(approach_box_distance(e), torch.tensor([0.0]))  # gated -> 0
 
 

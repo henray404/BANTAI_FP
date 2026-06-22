@@ -1,0 +1,37 @@
+# reward_weights.yaml — tunable reward/penalty weights for the warehouse pickup task.
+# Loaded by env/warehouse_env.py (WarehouseEnvCfg.__post_init__). Edit a value + restart the
+# run to retune shaping — no code change needed. Delete a key to fall back to its Python default.
+#
+# Sign convention (term func returns a raw signal; weight scales it):
+#   approach / carry : func = +distance       -> weight NEGATIVE = pull toward target.
+#                                                 MORE negative = stronger dense draw.
+#   collision / idle : func = 0 or -1          -> weight POSITIVE = effective per-step penalty
+#                                                 (e.g. collision 2.0 => -2/step on contact).
+#   grasp / deliver  : func = +signal          -> weight POSITIVE = reward.
+#   time_pen / drop  : weight NEGATIVE         -> penalty.
+#
+# Effective per-step / one-shot value shown in the comment.
+rewards:
+  # ── Phase A: approach + grasp (NOT holding) ──
+  approach:  -0.02    # dense ee->box pull. ↑magnitude (e.g. -0.05) = clearer gradient to the box
+  grasp:      5.0     # one-shot when box grasped + lifted
+
+  # ── Phase B: carry + place (holding) ──
+  carry:     -0.02    # dense box->correct-zone pull
+  deliver:   10.0     # per-step while correct box sits in correct color zone
+
+  # ── Always-on penalties ──
+  time_pen:  -0.005  # per-step time cost. WAS -0.05 (×1000 steps = -50, dwarfs grasp+5/deliver+10 →
+                     # policy "gives up": crashes/leaves bounds to end the episode early. See C2 in
+                     # docs/project/training_readiness_2026-06-22.md. Keep small (≈ -0.005).
+  # ONE collision term covers ALL physical contact: rack, obstacle/prop, AND wall (contact sensor
+  # reads net force on the chassis — per-object split was removed, it crashed PhysX on Blackwell).
+  # raise this to punish hitting things harder; lower (e.g. 1.0) if the robot freezes to dodge it.
+  collision:  2.0     # x(-1) => -2/step when chassis contact > 5N (rack / obstacle / wall)
+  drop:      -2.0     # one-shot when box dropped mid-carry outside a zone
+
+  # Two idle tiers — both reuse the same idle detector, stacking once past their thresholds:
+  idle:       0.02    # soft anti-freeze: x(-1) => -0.02/step once idle >= idle_steps
+  idle_slow:  0.1     # heavy "too slow": x(-1) => -0.1/step once idle >= idle_slow_steps
+  idle_steps: 50      # consecutive idle steps (@10Hz => 5s) before the soft idle penalty fires
+  idle_slow_steps: 300  # consecutive idle steps (@10Hz => 30s) before the heavy penalty fires

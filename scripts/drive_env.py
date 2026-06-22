@@ -54,6 +54,21 @@ parser.add_argument("--log", type=str, default="",
                     help="Write a per-step diagnostic CSV to this path (relative to project root). "
                          "Empty = off. Captures action, ee_pos, base roll/pitch/yaw, gripper, holding.")
 AppLauncher.add_app_launcher_args(parser)
+# Teleop sensitivities are tunable in configs/teleop.yaml — load them as argparse defaults so a
+# CLI flag still wins, the YAML overrides the baked-in fallbacks, and editing the file needs no
+# code change. Missing file/keys keep the hardcoded defaults above.
+_TELEOP_CFG = Path(__file__).resolve().parents[1] / "configs" / "teleop.yaml"
+if _TELEOP_CFG.exists():
+    try:
+        import yaml
+        _tele = yaml.safe_load(_TELEOP_CFG.read_text(encoding="utf-8")) or {}
+    except ImportError:
+        import ruamel.yaml as _ryaml
+        _tele = _ryaml.YAML(typ="safe").load(_TELEOP_CFG.read_text(encoding="utf-8")) or {}
+    _tele = _tele.get("teleop", {}) or {}
+    parser.set_defaults(**{k: _tele[k] for k in
+                           ("ee_sens", "lin", "ang", "chase", "chase_back", "chase_height")
+                           if k in _tele})
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True  # warehouse env always builds the onboard camera
 
@@ -136,7 +151,7 @@ def main() -> None:
     """Build the env, then loop: keyboard -> (6,) action -> env.step; print EE / grasp state."""
     cfg = WarehouseEnvCfg()
     cfg.scene.num_envs = 1
-    env = WarehouseGymEnv(cfg=cfg)
+    env = WarehouseGymEnv(cfg=cfg, arm_active=True)   # teleop: drive the Franka (training stays frozen)
     obs, _ = env.reset()
     print(f"[drive_env] reset ok. obs keys = {sorted(obs.keys())}")
     print(f"[drive_env] action = [base_lin, base_ang, ee_dx, ee_dy, ee_dz, gripper], shape (6,)")
