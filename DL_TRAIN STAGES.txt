@@ -1,0 +1,27 @@
+Run steps:
+
+conda activate isaaclab
+
+# 1. Sanity: confirm grasp fires with the fixed reward (stage 2 = spawn near box, isolates approach+grasp,
+#    train_ratio 128 = ~4x faster wall-clock than default 512). GUI on (no --headless).
+python scripts/train_dreamer.py --stage 2 --steps 15000 \
+  --logdir training/results/demo_run --config experiments/ablation_tr128.yaml
+
+Watch the window: robot should now visibly drive toward the box (approach reward pulls it in). Console/TensorBoard: grasp reward should fire >0 within ~5k steps post-prefill(2000). If holding never flips 1, stop â flag back, don't burn hours on stage 3.
+
+# 2. If grasp fires reliably: full task (nav -> grasp -> carry -> place) from real spawn distance.
+python scripts/train_dreamer.py --stage 3 --steps 50000 \
+  --logdir training/results/demo_run --config experiments/ablation_tr128.yaml
+
+Same --logdir = auto-resumes from latest.pt (vendor loop checks for it at start), keeps stacking steps.
+
+Save: automatic, no separate step. latest.pt written every eval_every (10000) steps in --logdir. Best episode (by success rate, ties by return) auto-saved to <logdir>/best/{best_model.pt, best_trajectory.csv, best_init.json} whenever a new eval beats the previous best.
+
+# 3. Demo â replay the best recorded episode in GUI, restores exact scene, no retrain/reload:
+python scripts/replay_best.py --run training/results/demo_run
+
+Reality check on timing (project's own constraint, RTX 5050/Blackwell, num_envs=1): even with tr128's ~4x speedup, expect 15k steps to take roughly an hour+, not minutes. --no-headless/GUI adds render overhead on top. If step 1 looks broken before that finishes, kill it (Ctrl+C) early â holding=1 printing or visible grasp in the window is enough signal, no need to wait for full 15k.
+
+Didn't need Opus â this was investigation + a 2-line config fix, well within current model.
+
+â» Baked for 5m 10s

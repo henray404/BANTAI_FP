@@ -188,9 +188,10 @@ RIDGEBACK_FRANKA_CFG = ArticulationCfg(
             # resolved EXPLOSIVELY — the base launched at huge velocity → position diverged →
             # contactN ~1e8 → contact-buffer overflow → PhysX CUDA error 700 (illegal memory access)
             # mid-run. On the 48GB 4090 this is NOT the 8GB-BAR1 OOM case (bugs_errors/...error700.md);
-            # it is a numerical blowup. Matches the box's proven cap (1.0). The box already had this;
-            # the robot articulation did not. Bump to ~5.0 if depenetration is too slow after testing.
-            max_depenetration_velocity=1.0,
+            # it is a numerical blowup. The box's cap (1.0) wasn't enough for the chassis — same
+            # crash recurred on an 8GB laptop at stage 2 (spawns 0.8m from the box, likely overlapping
+            # rack/box geometry at reset). Lowered 1.0 -> 0.5. Bump back up if depenetration too slow.
+            max_depenetration_velocity=0.5,
             # STABILITY FIX 2 (2026-06-24): cap absolute body velocity. The recurring crash is a
             # CUDA error-700 in GpuArticulationView (corrupt robot articulation state) after a few
             # minutes — the signature of a chassis/link velocity running away to inf -> NaN DOF
