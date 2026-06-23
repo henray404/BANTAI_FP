@@ -66,7 +66,11 @@ class CASlopeEnvWrapper:
     def _potential(self):
         """Current CA-SLOPE potential Phi(s) (num_envs,) from the live env state buffers."""
         s = self._src
-        return self.shaper.potential(s.ee_pos, s.box_pos, s.goal_pos, s.holding, s.goal_id_buf)
+        # FRAME FIX (2026-06-24): box_pos is env-local WORLD; ee_pos is BASE-frame (a small delta),
+        # so dist(ee_pos, box_pos) mixed frames -> wrong/garbage potential (same class as the C1 bug
+        # fixed in reward_pickup.approach_box_distance). Use ee_pos_world to match box_pos's frame.
+        ee = getattr(s, "ee_pos_world", s.ee_pos)
+        return self.shaper.potential(ee, s.box_pos, s.goal_pos, s.holding, s.goal_id_buf)
 
     def reset(self, *args, **kwargs):
         """Reset the env and re-anchor Phi(s) so the first shaping step is well-defined."""

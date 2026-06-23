@@ -34,7 +34,8 @@ from experiments.settings import load_settings
 
 
 def build_command(cfg: ExperimentConfig, seed: int, logdir: Path, steps: int,
-                  python: str, headless: bool, config_path: str | None) -> list[str]:
+                  python: str, headless: bool, config_path: str | None,
+                  curriculum: str | None = None) -> list[str]:
     """Build the subprocess argv for one (config, seed) run."""
     common = [python]
     head = ["--headless"] if headless else []
@@ -53,6 +54,8 @@ def build_command(cfg: ExperimentConfig, seed: int, logdir: Path, steps: int,
         cmd.append("--ca_slope")
     if cfg.visual_her:
         cmd.append("--visual_her")
+    if curriculum:                       # step-based curriculum auto-advance (dreamer only)
+        cmd += ["--curriculum", curriculum]
     return cmd
 
 
@@ -90,6 +93,10 @@ def main() -> None:
     ap.add_argument("--device", type=str, default=None,
                     help="Pin runs to a GPU, e.g. 'cuda:1' or '1' (sets CUDA_VISIBLE_DEVICES "
                          "for each subprocess). Use a different --device per terminal.")
+    ap.add_argument("--curriculum", type=str, default=None,
+                    help="Forward step-based curriculum to each DreamerV3 run, e.g. "
+                         "'2:0.0,3:0.5' (stage 2 then stage 3 from 50%% of steps). "
+                         "Ignored by SAC/PPO runs (no curriculum there).")
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--timeout", type=int, default=None, help="Per-run timeout (seconds).")
     ap.add_argument("--no-headless", action="store_true")
@@ -118,7 +125,7 @@ def main() -> None:
         logdir = results / f"{cfg.logname}_seed{seed}"
         done = logdir / "DONE"
         cmd = build_command(cfg, seed, logdir, steps, args.python,
-                            not args.no_headless, args.config)
+                            not args.no_headless, args.config, args.curriculum)
         tag = f"[{i}/{len(schedule)}] #{cfg.idx} {cfg.logname} seed{seed}"
 
         if done.exists():
