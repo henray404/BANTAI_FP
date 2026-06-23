@@ -1265,7 +1265,12 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
             if small_h is not None:
                 standoff = small_h[1] if heavy else small_h[0]
             else:
-                standoff = 1.1 if heavy else 1.0
+                # Clearance = rack_half_depth(0.45) + base_half_len(0.48) = 0.93 m center-to-center
+                # before edges touch. Old 1.0/1.1 left only ~0.07 m → base clipped the rack's own
+                # north face at spawn → contactN spikes (thousands) → `crashed` at ep_len≈8, so the
+                # policy never learned (back-and-forth degenerate). Raised to clear with ~0.3 m margin
+                # (1.25/1.40); the policy/demo still drives the last ~0.6 m in for the grab.
+                standoff = 1.4 if heavy else 1.25
             base_x, base_y, yaw = spawn_pose_near_box((bx, by), standoff=standoff)
             origin = self.scene.env_origins[e]
             root[e, 0] = origin[0] + base_x
