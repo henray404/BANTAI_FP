@@ -29,18 +29,63 @@ CSV_HEADER = ("step", "success_rate", "success_std", "mean_length", "mean_return
 
 
 def _rl_env(env):
-    """Unwrap any gym wrappers down to the WarehouseRLEnv holding the state buffers."""
+    """Unwrap gym/SB3 wrappers down to the WarehouseRLEnv that holds the state buffers.
+
+    Descends through BOTH the gym `.env` chain and the project `._env` nesting until it
+    reaches the object carrying the reward buffers (WarehouseRLEnv has `box_pos` + `scene`).
+    The old single `e._env` stopped one level too shallow on the SB3 path
+    (SB3WarehouseEnv._env == WarehouseGymEnv, NOT WarehouseRLEnv) → AttributeError inside
+    pickup_delivered / capture_init_state, which crashed every PPO/SAC eval.
+    """
     e = env
-    while not hasattr(e, "_env") and hasattr(e, "env"):
-        e = e.env
-    return e._env  # WarehouseGymEnv._env == WarehouseRLEnv
+    seen: set[int] = set()
+    while id(e) not in seen:
+        seen.add(id(e))
+        if hasattr(e, "box_pos") and hasattr(e, "scene"):
+            return e
+        nxt = getattr(e, "_env", None)
+        if nxt is None:
+            nxt = getattr(e, "env", None)
+        if nxt is None or nxt is e:
+            break
+        e = nxt
+    return getattr(e, "_env", e)  # fallback: preserve old behaviour
 
 
 def episode_success(env) -> bool:
-    """True if the (single) env currently has the correct box delivered in its zone."""
+    """True if the (single) env currently has the correct box delivered in its zone.
+
+    NOTE: reads the LIVE buffers — only valid BEFORE the env auto-resets. evaluate_policy no
+    longer uses this for scoring (it latches `_delivered_this_step` during the rollout); kept
+    for callers/tests that hold a pre-reset env.
+    """
     from env.reward_pickup import pickup_delivered
 
     return bool(pickup_delivered(_rl_env(env)).reshape(-1)[0])
+
+
+def _delivered_this_step(rl, info) -> bool:
+    """True if the delivery/success condition fired on the step just taken.
+
+    Reads the env info flag first (the dreamer path surfaces 'deliver_event'); falls back to
+    the termination manager's 'success' term, which still reflects the terminating step even
+    after IsaacLab's in-step auto-reset (the same read the WarehouseGymEnv DIAG uses). This
+    avoids the old bug where pickup_delivered() ran on the already-reset state → always 0.
+    """
+    if isinstance(info, dict):
+        for k in ("success", "deliver_event"):
+            if k in info:
+                try:
+                    return bool(np.asarray(_to_np(info[k])).reshape(-1)[0])
+                except Exception:
+                    return bool(info[k])
+    tm = getattr(rl, "termination_manager", None)
+    if tm is not None and "success" in getattr(tm, "active_terms", []):
+        try:
+            return bool(tm.get_term("success")[0].item())
+        except Exception:
+            return False
+    return False
 
 
 def evaluate_policy(env, act_fn: Callable[[dict], np.ndarray],
@@ -58,28 +103,32 @@ def evaluate_policy(env, act_fn: Callable[[dict], np.ndarray],
         {"success_rate": ..., "success_std": ..., "mean_length": ..., "mean_return": ...}
     """
     successes, lengths, returns = [], [], []
+    rl = _rl_env(env)  # stable across resets; unwrap once
     for _ in range(episodes):
         obs, _ = env.reset()
         if recorder is not None:
             from env.scene_snapshot import capture_init_state
-            recorder.begin(capture_init_state(_rl_env(env)))
-        done, ep_len, ep_ret = False, 0, 0.0
+            recorder.begin(capture_init_state(rl))
+        done, ep_len, ep_ret, delivered = False, 0, 0.0, False
         while not done:
             action = act_fn(obs)
-            obs, reward, terminated, truncated, _ = env.step(action)
+            obs, reward, terminated, truncated, info = env.step(action)
             r = float(np.asarray(_to_np(reward)).reshape(-1)[0])
             ep_ret += r
             ep_len += 1
+            # Latch success on the terminating step: the env auto-resets its buffers inside
+            # step(), so the old post-loop pickup_delivered() check always read 0.
+            delivered = delivered or _delivered_this_step(rl, info)
             if recorder is not None:
                 from env.scene_snapshot import read_replay_state
-                robot_xyz, ee_xyz, holding = read_replay_state(_rl_env(env))
+                robot_xyz, ee_xyz, holding = read_replay_state(rl)
                 recorder.step(ep_len, action, robot_xyz, ee_xyz, holding, r)
             term = bool(np.asarray(_to_np(terminated)).reshape(-1)[0])
             trunc = bool(np.asarray(_to_np(truncated)).reshape(-1)[0])
             done = term or trunc
             if term:
                 break
-        succ = 1.0 if episode_success(env) else 0.0
+        succ = 1.0 if delivered else 0.0
         successes.append(succ)
         lengths.append(ep_len)
         returns.append(ep_ret)

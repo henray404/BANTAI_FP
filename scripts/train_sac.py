@@ -118,6 +118,13 @@ def main() -> None:
                 self._csv.log(self.num_timesteps, metrics)
                 if self._best.update(self.num_timesteps, metrics):
                     self.model.save(str(self._best.dir / "best_model"))
+                # BUG 3 resync: eval reset+stepped the SAME underlying Isaac env (only one sim
+                # per process), desyncing SB3's cached rollout obs. Start a fresh episode here so
+                # the trainer does not bootstrap value across the eval gap / train on stale obs.
+                import numpy as _np
+                self.model._last_obs = self.model.env.reset()
+                self.model._last_episode_starts = _np.ones(
+                    (self.model.env.num_envs,), dtype=bool)
             return True
 
     _best = BestModelTracker(logdir)

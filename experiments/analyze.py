@@ -122,17 +122,22 @@ def collect(results_dir: str | Path) -> dict[int, dict]:
     results_dir = Path(results_dir)
     out: dict[int, dict] = {}
     for cfg in CONFIGS:
-        finals, steps = [], []
+        finals, steps, empty = [], [], []
         for seed in SEEDS:
             csv_path = results_dir / f"{cfg.logname}_seed{seed}" / "eval_metrics.csv"
             if not csv_path.exists():
+                empty.append((seed, "missing"))
                 continue
             rows = read_run_history(csv_path)
+            if not rows:
+                empty.append((seed, "no eval rows"))  # header-only CSV → don't silently nan
+                continue
             finals.append(final_success(rows))
             s = steps_to_threshold(rows)
             if s is not None:
                 steps.append(s)
-        out[cfg.idx] = {"final": finals, "steps_thr": steps, "logname": cfg.logname}
+        out[cfg.idx] = {"final": finals, "steps_thr": steps,
+                        "logname": cfg.logname, "empty": empty}
     return out
 
 
@@ -143,16 +148,29 @@ def render_summary(data: dict[int, dict], threshold: float = DEFAULT_THRESHOLD) 
              "| # | config | seeds | success rate | steps to "
              f"{threshold:.0%} (mean) |",
              "|---|--------|-------|--------------|------------------------|"]
+    warnings: list[str] = []
     for cfg in CONFIGS:
         d = data.get(cfg.idx, {})
         finals = d.get("final", [])
+        empty = d.get("empty", [])
         mean, std = aggregate(finals)
         steps = d.get("steps_thr", [])
         steps_mean = f"{sum(steps) / len(steps):,.0f}" if steps else "not reached"
+        sr = f"{mean:.3f} +/- {std:.3f}" if finals else "**NO DATA**"
+        if empty:
+            detail = ", ".join(f"seed{s}: {why}" for s, why in empty)
+            warnings.append(f"- #{cfg.idx} {cfg.logname}: "
+                            f"{len(empty)}/{len(SEEDS)} run(s) without eval data ({detail})")
         lines.append(
-            f"| {cfg.idx} | {cfg.logname} | {len(finals)} | "
-            f"{mean:.3f} +/- {std:.3f} | {steps_mean} |"
+            f"| {cfg.idx} | {cfg.logname} | {len(finals)} | {sr} | {steps_mean} |"
         )
+
+    if warnings:
+        lines += ["\n## WARNING: runs with no eval data\n",
+                  "Shown as **NO DATA** / nan above -- `eval_metrics.csv` was missing or "
+                  "header-only (no rows logged). The eval callback recorded nothing; check "
+                  "`experiments.metrics.evaluate_policy`. Do NOT trust these rows.",
+                  *warnings]
 
     lines += ["\n## Pairwise significance (Mann-Whitney U, two-sided)\n",
               "| comparison | what it isolates | mean A | mean B | U | p | method |",
