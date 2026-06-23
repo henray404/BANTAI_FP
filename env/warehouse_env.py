@@ -499,6 +499,11 @@ class WarehouseEnvCfg(ManagerBasedRLEnvCfg):
         self.decimation = 20           # 200 Hz / 20 = 10 Hz control (DreamerNav std, saves VRAM)
         self.episode_length_s = 100.0  # 100s x 10Hz = 1000 steps (nav + grasp + carry + place)
         self.sim.dt = 0.005
+        # WORKAROUND (2026-06-24): GPU PhysX solver crashes (CUDA error 700, PxgTGSCudaSolverCore)
+        # recur on this machine (RTX 4060 8GB) even after VRAM-zombie cleanup + lower chassis
+        # depenetration cap. Force CPU physics to bypass the GPU solver entirely. Slower per-step
+        # (single env, so tolerable); revert (delete this line) if the GPU solver proves stable again.
+        self.sim.device = "cpu"
         # Live env knobs from configs/env_config.yaml override the defaults just set (missing keys
         # keep them). Base speed lives in module globals (read at call time in _base_cmd), so update
         # them here. ponytail: globals are process-wide — fine at num_envs=1, last cfg wins if many.
