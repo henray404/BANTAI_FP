@@ -33,7 +33,9 @@ visual_her:
 # sample-efficiency default; lower it to trade sample-efficiency for speed, but keep it
 # identical across #3-6 or the ablation comparison breaks).
 dreamer:
-  train_ratio: 512
+  train_ratio: 128   # lowered 512->128 for wall-clock (fps ~10 vs ~5). Trades some sample-efficiency
+                     # for speed; kept identical across #3-6 so the ablation comparison stays valid.
+                     # Bump back toward 256/512 for a final high-quality run if time allows.
   prefill: 2000
 
 # ── Baselines ─────────────────────────────────────────────────────────────────
