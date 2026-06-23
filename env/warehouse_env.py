@@ -1130,12 +1130,14 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
             state[:, 7:13] = 0.0
             box.write_root_state_to_sim(state, env_ids=torch.tensor([e], device=self.device))
 
-    def _attach_boxes(self, env_ids: torch.Tensor, anchor: torch.Tensor) -> None:
-        """FixedJoint-weld each env's target box to base_link at the carry anchor (physics carry).
+    def _attach_boxes(self, env_ids: torch.Tensor, anchor: torch.Tensor | None = None) -> None:
+        """FixedJoint-weld each env's target box to base_link AT THE BOX'S CURRENT WORLD POSE.
 
-        Authors the joint's body0 anchor = box pose in the base_link frame, so PhysX holds the box
-        exactly where it was snapped (in front of + above the chassis) instead of yanking it onto
-        the base_link origin. `anchor` (N,3) = the world carry point the box was just snapped to.
+        The joint's body0 anchor is the box's ACTUAL pose in the base_link frame, so PhysX sees the
+        two bodies already coincident → no "disjointed body transforms" snap. A prior version welded
+        to a snapped-EE target that write_root_state_to_sim had not yet flushed, so PhysX violently
+        snapped the box and spiked chassis contact to 1-4 kN → crashed/bounds reset at ep_len≈5
+        (= RESET_GRACE_STEPS). See DIAG 2026-06-23. `anchor` kept for signature compat but unused.
         """
         from env.attach import attach_box
         from isaaclab.utils.math import subtract_frame_transforms
@@ -1144,13 +1146,15 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         base = robot.body_names.index("base_link")
         p_b = robot.data.body_pos_w[:, base]                       # (N,3) chassis world pos
         q_b = robot.data.body_quat_w[:, base]                      # (N,4) chassis world quat
-        q_box = torch.zeros_like(q_b); q_box[:, 0] = 1.0           # box upright (matches snap)
-        # Box pose expressed in the base_link frame = the joint's body0 local anchor.
-        p_rel, q_rel = subtract_frame_transforms(p_b, q_b, anchor, q_box)
         for e in env_ids.tolist():
+            box = self.scene[self.target_box_name[e]]
+            box_p = box.data.root_pos_w[e:e + 1]                   # box ACTUAL world pos (no target)
+            box_q = box.data.root_quat_w[e:e + 1]
+            # Box pose in the base_link frame = the joint's body0 local anchor (matches reality).
+            p_rel, q_rel = subtract_frame_transforms(p_b[e:e + 1], q_b[e:e + 1], box_p, box_q)
             attach_box(
                 stage, self._base_link_path(e), self._box_prim_path(e),
-                local_pos0=tuple(p_rel[e].tolist()), local_rot0=tuple(q_rel[e].tolist()),
+                local_pos0=tuple(p_rel[0].tolist()), local_rot0=tuple(q_rel[0].tolist()),
             )
 
     def _detach_boxes(self, env_ids: torch.Tensor) -> None:
@@ -1165,8 +1169,10 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         """Weld newly-grasped boxes to the hand; unweld released ones (replaces kinematic carry)."""
         newly_ids = torch.nonzero(newly, as_tuple=False).flatten()
         if newly_ids.numel():
-            self._snap_boxes_to_ee(newly_ids, ee_world)  # clean relative transform at weld time
-            self._attach_boxes(newly_ids, ee_world)
+            # Weld the box WHERE IT IS (proximity grasp → already at the hand). No pre-weld teleport:
+            # write_root_state_to_sim doesn't flush within the step, so welding to the snapped target
+            # made PhysX snap the box from its stale pose → contact explosion → crashed/bounds reset.
+            self._attach_boxes(newly_ids)
             # Box rides 0.6 m in front of the chassis; with collision ON it rams the rack the box was
             # just lifted off and pins the base. Delivery is position-based (box_pos vs zone), so the
             # carried box needs no collision — turn it off while held (re-enabled on release).
