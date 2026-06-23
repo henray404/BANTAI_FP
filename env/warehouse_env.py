@@ -492,6 +492,16 @@ class WarehouseEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = self.decimation
         # Arm + contact stability (Ridgeback-Franka): reduce noisy base/arm velocities.
         self.sim.physx.enable_external_forces_every_iteration = True
+        # GPU PhysX buffer headroom. The warehouse (racks + 54 decks + boxes + robot) makes many
+        # collision pairs; the default GPU buffers can overflow mid-sim → "GPU ... fail to launch
+        # kernel" / CUDA error 700 (illegal memory access) in the solver after some minutes (seen on
+        # vast.ai). Bump generously — costs VRAM, fine on >=11 GB; the 8 GB box runs the reduced
+        # scene (scene.num_boxes). See bugs_errors/2026-06-23_oom-bar1-physx-error700.md.
+        self.sim.physx.gpu_found_lost_pairs_capacity = 2 ** 23
+        self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 2 ** 25
+        self.sim.physx.gpu_total_aggregate_pairs_capacity = 2 ** 23
+        self.sim.physx.gpu_max_rigid_contact_count = 2 ** 23
+        self.sim.physx.gpu_collision_stack_size = 2 ** 26
         self.viewer.eye = (0.0, -20.0, 18.0)
         self.viewer.lookat = (0.0, 0.0, 0.5)
         # Reward/penalty weights are tunable via configs/reward_weights.yaml — edit + restart to
