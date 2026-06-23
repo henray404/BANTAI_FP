@@ -41,9 +41,16 @@ def drop_penalty(env) -> torch.Tensor:
     return env.drop_event.float()
 
 
-def box_dropped(env) -> torch.Tensor:
-    """(N,) bool: a carried box fell to the floor this step (env.drop_event). Termination → reset."""
-    return env.drop_event
+def box_dropped(env, grace_steps: int = 5) -> torch.Tensor:
+    """(N,) bool: a carried box fell to the floor this step (env.drop_event). Termination → reset.
+
+    Suppressed during the spawn-settle grace window (matches warehouse_reward.RESET_GRACE_STEPS) so a
+    step-0 weld/teleport transient (e.g. stage-1 pregrasp) can't false-trip it. Pure: reads only
+    env.drop_event + env.episode_length_buf (no Isaac import).
+    """
+    n = getattr(env, "episode_length_buf", None)
+    past = True if n is None else (n >= grace_steps)
+    return env.drop_event & past
 
 
 def carry_regress_penalty(env, regress_steps: int = 50) -> torch.Tensor:

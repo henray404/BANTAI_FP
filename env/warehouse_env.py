@@ -160,6 +160,14 @@ CHECKPOINT_RING_M = 2.0
 # checkpoint again. Until the restore weld is made snap-free + verified in sim, failures fall back
 # to a normal fresh spawn (the proven path). Flip True to re-enable.
 ENABLE_RESET_TO_CHECKPOINT = False
+# DISABLED 2026-06-23: active-arm (Lane B) under RL exploration diverges — raw policy EE deltas
+# drive the IK into configs the stiff Franka actuators (hand stiffness 1e5) chase with absurd force
+# (contact spikes to 1e6-1e8 N at step 0 → crashed/bounds fire → train_length 1.0). Gentle teleop
+# never hit this; aggressive RL actions do. Training falls back to the PROVEN frozen-arm + magnetic
+# grasp (Jalan A): arm pinned to home, base drives the hand near the box, grasp on proximity. The
+# EE action channels are ignored. Flip True only after the active arm is stabilised under RL.
+# (arm_active=True, e.g. drive_env teleop, still drives the arm regardless of this flag.)
+ENABLE_ACTIVE_ARM = False
 
 
 # ── Custom Observation Functions ──────────────────────────────────────
@@ -1381,10 +1389,25 @@ class WarehouseGymEnv(gym.Env):
         # override; FROZEN for stage 1 (pre-grasped nav — isolates carry from arm motion). _drive_arm
         # sets the arm joint targets BEFORE the step (the PD tracks them across the decimation substeps);
         # _freeze_held_arm hard-pins held envs after (box welded to base_link, hand must not drift).
-        active_arm = self.arm_active or self._env.stage >= STAGE_GRASP
+        active_arm = self.arm_active or (ENABLE_ACTIVE_ARM and self._env.stage >= STAGE_GRASP)
         if active_arm:
             self._env._drive_arm(ee3)
         obs, reward, terminated, truncated, info = self._env.step(internal)
+        # DIAG (temporary): on the first few terminations print WHICH DoneTerm fired + key state, to
+        # pin why episodes die at step 1. Rate-limited (8x), read-only. Remove once diagnosed.
+        try:
+            if bool(torch.as_tensor(terminated).any()) and getattr(self, "_diag_n", 0) < 8:
+                self._diag_n = getattr(self, "_diag_n", 0) + 1
+                tm = self._env.termination_manager
+                fired = [n for n in tm.active_terms if bool(tm.get_term(n)[0].item())]
+                from env.warehouse_reward import _contact_force
+                from isaaclab.managers import SceneEntityCfg
+                cf = float(_contact_force(self._env, SceneEntityCfg("contact_sensor"))[0])
+                print(f"[DIAG-term] ep_len={int(self._env.episode_length_buf[0])} fired={fired} "
+                      f"contactN={cf:.1f} holding={bool(self._env.holding[0])} "
+                      f"act={[round(float(x),2) for x in action[0].tolist()]}", flush=True)
+        except Exception as _e:
+            print(f"[DIAG-term] probe err: {_e}", flush=True)
         if active_arm:
             self._env._freeze_held_arm()                    # carry: pin held envs' arm to the grab pose
         else:
