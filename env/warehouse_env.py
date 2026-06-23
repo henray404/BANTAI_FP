@@ -1387,6 +1387,25 @@ class WarehouseGymEnv(gym.Env):
             terms = reward_breakdown(self._env)
             info["reward_terms"] = terms
             info["reward_total"] = sum(v for v in terms.values() if v == v)  # skip NaN
+        # DIAG (temporary, read-only): on the first terminations print WHICH DoneTerm fired + key
+        # state, to pin why episodes die at ep_len ~5 (= RESET_GRACE_STEPS). base_xy (env-local)
+        # reveals bounds (|x|>9.5 / |y|>14.5); contactN reveals crashed (>50 N). Remove once diagnosed.
+        try:
+            if bool(torch.as_tensor(terminated).any()) and getattr(self, "_diag_n", 0) < 12:
+                self._diag_n = getattr(self, "_diag_n", 0) + 1
+                tm = self._env.termination_manager
+                fired = [n for n in tm.active_terms if bool(tm.get_term(n)[0].item())]
+                from env.warehouse_reward import _contact_force
+                from isaaclab.managers import SceneEntityCfg
+                cf = float(_contact_force(self._env, SceneEntityCfg("contact_sensor"))[0])
+                rb = self._env.scene["robot"].data.body_pos_w[0, self._base_link_idx]
+                bx = float(rb[0] - self._env.scene.env_origins[0, 0])
+                by = float(rb[1] - self._env.scene.env_origins[0, 1])
+                print(f"[DIAG-term] ep_len={int(self._env.episode_length_buf[0])} fired={fired} "
+                      f"contactN={cf:.0f} base_xy=({bx:.2f},{by:.2f}) holding={bool(self._env.holding[0])} "
+                      f"act={[round(float(x),2) for x in action[0].tolist()]}", flush=True)
+        except Exception as _e:
+            print(f"[DIAG-term] probe err: {_e}", flush=True)
         return self._unwrap_obs(obs), reward, terminated, truncated, info
 
     def render(self):
