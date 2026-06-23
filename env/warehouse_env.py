@@ -66,6 +66,10 @@ from env.reward_pickup import (
     pbs_step,
     pickup_delivered,
     pickup_delivered_reward,
+    rack_avoid_shaped,
+    rack_backout_shaped,
+    rack_proximity_penalty,
+    RACK_AVOID_INFLUENCE_M,
 )
 
 
@@ -461,6 +465,13 @@ class RewardsCfg:
     # zone (backing up / dawdling). x(-1)*weight → -0.1/step. Stops "kelamaan mundur" to the finish.
     carry_regress = RewTerm(func=carry_regress_penalty,
                             params={"regress_steps": CARRY_REGRESS_STEPS}, weight=0.1)
+    # Pre-contact rack avoidance (mirrors the scripted demo's potential field — see reward_pickup).
+    # rack_avoid: soft 0..-1 ramp as the chassis nears a NON-target rack during APPROACH (weight 0.5
+    # → up to -0.5/step, well under collision/under_rack=2 so it WARNS before those bite, giving the
+    # agent a smooth detour gradient toward the box). rack_backout: +Δdist while HOLDING and still in
+    # the rack band (escape the grab-rack right after grasp), weight 1.0.
+    rack_avoid   = RewTerm(func=rack_avoid_shaped,    weight=0.5)
+    rack_backout = RewTerm(func=rack_backout_shaped,  weight=1.0)
 
 
 # ── Terminations ──────────────────────────────────────────────────────
@@ -530,7 +541,7 @@ class WarehouseEnvCfg(ManagerBasedRLEnvCfg):
         _w = _load_reward_weights()
         for _name in ("approach", "grasp", "carry", "deliver", "time_pen",
                       "collision", "idle", "idle_slow", "drop", "failure", "under_rack",
-                      "carry_regress"):
+                      "carry_regress", "rack_avoid", "rack_backout"):
             if _name in _w:
                 getattr(self.rewards, _name).weight = float(_w[_name])
         if "idle_steps" in _w:
@@ -592,6 +603,13 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         self._prev_carry_dist_pbs = torch.zeros(N, device=dev)
         self._approach_active = torch.zeros(N, dtype=torch.bool, device=dev)
         self._carry_active = torch.zeros(N, dtype=torch.bool, device=dev)
+        # Rack-avoidance shaping buffers — written once/step by _update_rack_avoid, READ by
+        # reward_pickup.rack_avoid_shaped/rack_backout_shaped. _rack_active gates the backout Δdist
+        # spike at reset + grasp boundary (emit only when in the rack band this step AND last step).
+        self._rack_avoid = torch.zeros(N, device=dev)
+        self._rack_backout = torch.zeros(N, device=dev)
+        self._prev_rack_dist = torch.zeros(N, device=dev)
+        self._rack_active = torch.zeros(N, dtype=torch.bool, device=dev)
         # Reset-to-checkpoint (num_envs==1): a saved sim_state blob + the closest 2m ring captured.
         self._ckpt_valid = torch.zeros(N, dtype=torch.bool, device=dev)
         self._ckpt_ring = torch.zeros(N, device=dev)
@@ -736,6 +754,11 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         self._carry_shaping[env_ids_t] = 0.0
         self._approach_active[env_ids_t] = False
         self._carry_active[env_ids_t] = False
+        # Rack-avoid: zero the shaping + active flag so the first post-reset step emits 0 (prev_rack_dist
+        # resyncs via the active guard, like PBS above) — no step-1 backout spike.
+        self._rack_avoid[env_ids_t] = 0.0
+        self._rack_backout[env_ids_t] = 0.0
+        self._rack_active[env_ids_t] = False
         self._reanchor_arm(env_ids_t)   # active arm: re-home the EE target/smooth buffers at spawn
         # Fresh spawn just ran for ALL envs (a valid baseline). For a checkpoint restore, overwrite
         # env-0 with the saved state; if it throws, the env stays in the fresh spawn (fail-safe).
@@ -1031,6 +1054,51 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         # shaping; it only catches divergence. Does NOT fix the divergence itself (physics) — masks it.
         self._approach_shaping = self._approach_shaping.clamp(-1.0, 1.0)
         self._carry_shaping = self._carry_shaping.clamp(-1.0, 1.0)
+
+    def _rack_centres(self) -> torch.Tensor:
+        """Cached (R,2) tensor of env-local rack centres — only the SPAWNED racks (ACTIVE_RACK_POSITIONS
+        honours scene.num_boxes), matching warehouse_reward._rack_xy so avoid never targets an empty slot."""
+        if not hasattr(self, "_rack_xy_buf"):
+            try:
+                from env.warehouse_scene import ACTIVE_RACK_POSITIONS as _racks
+            except Exception:
+                from env.layout_grid import RACK_POSITIONS as _racks
+            self._rack_xy_buf = torch.tensor(
+                [[x, y] for (x, y, _z) in _racks], device=self.device, dtype=torch.float32
+            )
+        return self._rack_xy_buf
+
+    def _update_rack_avoid(self) -> None:
+        """Pre-contact rack-avoidance shaping (mirrors scripts/demo_pickup.py's potential field).
+        Writes self._rack_avoid (approach-phase soft proximity penalty, target rack EXCLUDED so the
+        grasp approach is never punished) and self._rack_backout (post-grasp reward for moving away
+        from the nearest rack). Read NEXT step by reward_pickup.rack_avoid_shaped/rack_backout_shaped
+        — same one-step lag as _update_pbs_shaping (runs right after it at step end)."""
+        racks = self._rack_centres()                              # (R,2) env-local
+        robot: Articulation = self.scene["robot"]
+        bidx = robot.body_names.index("base_link")
+        xy = robot.data.body_pos_w[:, bidx, :2] - self.scene.env_origins[:, :2]   # (N,2) env-local
+        d = torch.norm(xy[:, None, :] - racks[None, :, :], dim=-1)                # (N,R) chassis->each rack
+        # Target rack = the rack nearest the (env-local) box. Excluded from the approach penalty so the
+        # robot can press right up to it to grasp; sibling racks still repel (like the demo's SKIP_NEAR_TARGET).
+        tgt = torch.argmin(torch.norm(self.box_pos[:, None, :2] - racks[None, :, :], dim=-1), dim=-1)  # (N,)
+        d_excl = d.clone()
+        d_excl[torch.arange(self.num_envs, device=self.device), tgt] = float("inf")
+        d_near_excl = d_excl.min(dim=-1).values                  # (N,) nearest NON-target rack
+        avoid = rack_proximity_penalty(d_near_excl, RACK_AVOID_INFLUENCE_M)       # 0..-1 ramp
+        # Approach phase only (NOT holding): once carrying, collision/under_rack + carry shaping take over.
+        self._rack_avoid = torch.where(~self.holding, avoid, torch.zeros_like(avoid)).clamp(-1.0, 0.0)
+        # Post-grasp escape: reward INCREASING distance to the nearest rack (INCLUDING the grab rack)
+        # while holding and still inside the influence band. Δdist telescopes like PBS; clamp ≥0 so it
+        # only ever rewards leaving (never punishes a transient step back in). _rack_active guards the
+        # boundary spike (prev_rack_dist stale at reset/grasp) — emit only when in-band BOTH steps.
+        d_near_all = d.min(dim=-1).values                        # (N,) nearest rack incl. grab rack
+        near_band = d_near_all < RACK_AVOID_INFLUENCE_M
+        delta = (d_near_all - self._prev_rack_dist).clamp(min=0.0)
+        emit = self.holding & near_band & self._rack_active
+        self._rack_backout = torch.where(emit, delta, torch.zeros_like(delta)).clamp(0.0, 1.0)
+        self._prev_rack_dist = d_near_all
+        self._rack_active = self.holding & near_band
 
     def _update_checkpoint(self) -> None:
         """Snapshot the sim state (env 0) while carrying — at grasp and each closer CHECKPOINT_RING_M
@@ -1469,6 +1537,7 @@ class WarehouseGymEnv(gym.Env):
         self._env._update_stuck()                           # idle detector for stuck_timeout reset
         self._env._update_carry_progress()                  # backing-up-from-zone detector
         self._env._update_pbs_shaping()                     # potential-based approach/carry shaping
+        self._env._update_rack_avoid()                      # pre-contact rack avoidance + post-grasp backout
         self._env._update_checkpoint()                      # snapshot for reset-to-checkpoint
         self._global_step += 1                              # curriculum: count global env steps
         self._maybe_advance_stage()                         # advance stage if a schedule crossed

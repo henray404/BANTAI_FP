@@ -114,3 +114,38 @@ def carry_shaped(env) -> torch.Tensor:
     zone → use with a POSITIVE weight (sign flipped vs the old carry_distance)."""
     s = getattr(env, "_carry_shaping", None)
     return torch.zeros(env.num_envs, device=env.device) if s is None else s
+
+
+# ── Rack-avoidance shaping (mirrors the scripted demo's potential field) ───────
+# scripts/demo_pickup.py KNOWS every rack xy and repels the base BEFORE contact (AVOID_INFLUENCE);
+# the RL agent only ever sees collision/under_rack penalties AFTER it has already hit/entered a rack
+# — too late to learn a smooth detour, so training often stalls grazing a sibling rack on the way to
+# the box. These two terms hand the agent the SAME pre-contact gradient the demo steers by:
+#   rack_avoid_shaped  : soft penalty ramping in as the chassis nears a NON-target rack (approach).
+#   rack_backout_shaped: reward for INCREASING distance to the nearest rack while holding (escape the
+#                        grab-rack right after grasp — mirrors the demo's BACKOUT_STEPS reverse).
+# Both buffers are written once/step by WarehouseRLEnv._update_rack_avoid and only READ here, so the
+# functions stay pure (same env-buffer-reader pattern as approach_box_shaped / carry_shaped).
+RACK_AVOID_INFLUENCE_M = 1.6  # chassis-to-rack-centre distance under which the soft penalty ramps in
+
+
+def rack_proximity_penalty(d_nearest: torch.Tensor, influence: float = RACK_AVOID_INFLUENCE_M):
+    """Soft 0..1 ramp: 0 at/beyond `influence`, rising linearly to 1 at the rack centre. Returned
+    NEGATIVE (use with a POSITIVE weight, like collision). Pure tensor op → unit-testable on its own."""
+    pen = ((influence - d_nearest) / influence).clamp(0.0, 1.0)
+    return -pen
+
+
+def rack_avoid_shaped(env) -> torch.Tensor:
+    """Approach-phase soft rack-proximity penalty. Reads env._rack_avoid (set by _update_rack_avoid;
+    excludes the target rack so pressing in to grasp is never punished). NEGATIVE-when-near → use
+    with a POSITIVE weight."""
+    s = getattr(env, "_rack_avoid", None)
+    return torch.zeros(env.num_envs, device=env.device) if s is None else s
+
+
+def rack_backout_shaped(env) -> torch.Tensor:
+    """Post-grasp escape reward: POSITIVE when a HELD robot moves AWAY from the nearest rack (backing
+    out of the grab-rack). Reads env._rack_backout. POSITIVE weight."""
+    s = getattr(env, "_rack_backout", None)
+    return torch.zeros(env.num_envs, device=env.device) if s is None else s

@@ -34,6 +34,7 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Scripted pickup demo")
 parser.add_argument("--stage", type=int, default=2, help="curriculum stage to demo (2 = spawn near box)")
+parser.add_argument("--seed", type=int, default=0, help="random seed for reproducibility")
 parser.add_argument("--episodes", type=int, default=3, help="number of pickup episodes to run")
 parser.add_argument("--max_steps", type=int, default=600, help="step cap per episode")
 parser.add_argument("--log_every", type=int, default=5,
@@ -54,6 +55,9 @@ simulation_app = app_launcher.app
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
+
+np.random.seed(args_cli.seed)
+torch.manual_seed(args_cli.seed)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))

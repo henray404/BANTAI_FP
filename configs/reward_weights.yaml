@@ -38,6 +38,15 @@ rewards:
   carry_regress: 0.3  # x(-1) => -0.1/step once a HELD box stalls/backs-up ~5s without nearing the
                       # zone (CARRY_REGRESS_STEPS in warehouse_env.py). Stops "kelamaan mundur".
 
+  # ── Pre-contact rack avoidance (mirrors scripts/demo_pickup.py's potential field) ──
+  # The scripted demo repels the base from racks BEFORE contact; collision/under_rack only fire AFTER
+  # the robot already hit/entered a rack — too late to learn a detour. These give that early gradient.
+  rack_avoid:   0.5   # soft 0..-1 ramp as the chassis nears a NON-target rack (approach only). UP =
+                      # gives racks a wider berth; too high = won't approach the box (target excluded,
+                      # but a sibling rack sits ~1.5 m away). Keep < collision/under_rack (2.0).
+  rack_backout: 1.0   # +Δdist/step while HOLDING and still in the rack band — escape the grab-rack
+                      # right after grasp (demo's BACKOUT reverse). UP = leaves the rack faster.
+
   # ── Failure-reset penalty (high, fixed) ──
   # One-shot HIGH cost on ANY failure reset: crash (>50N), dropped carried box, no-grasp 30s timeout,
   # out-of-bounds, or stuck. FIXED (not escalating — a non-stationary reward hurts the world model).
