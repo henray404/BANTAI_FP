@@ -713,6 +713,11 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
             self._set_box_collision(env_ids_t, enabled=True)    # re-enable collision after carry
         self._sample_targets(env_ids_t)
         super()._reset_idx(env_ids)
+        # reset_root_state_uniform moved only the ROOT anchor; zero the velocity-controlled dummy base
+        # joints so base_link lands AT the north anchor, not anchor + last episode's drift (the
+        # crashed/bounds-at-ep_len-5 spawn bug). Stage-2 _spawn_base_near_box re-zeros after moving the
+        # anchor near the box — idempotent.
+        self._zero_base_joints(env_ids_t)
         self._randomize_box_poses(env_ids_t)  # after super() so scene.reset() doesn't undo it
         self._refresh_target_box_pos(env_ids_t)
         self._apply_stage_reset(env_ids_t)     # stage-2 spawn-near-box / stage-1 pre-grasp
@@ -1260,6 +1265,17 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
             root[e, 6] = math.sin(half)   # qz (yaw about world z)
             root[e, 7:13] = 0.0
         robot.write_root_state_to_sim(root, env_ids=env_ids)
+        self._zero_base_joints(env_ids)
+
+    def _zero_base_joints(self, env_ids: torch.Tensor) -> None:
+        """Zero the dummy base prismatic/revolute joints (pos + vel) for env_ids.
+
+        CRITICAL on EVERY reset: base_link = root_anchor + dummy-base-joint offset, and the base
+        joints are VELOCITY-controlled so their integrated POSITION is never commanded back to 0.
+        reset_root_state_uniform moves only the root anchor; without this, base_link respawns at the
+        north anchor PLUS last episode's drift → out of bounds / inside a rack → crashed/bounds at
+        ep_len≈grace (train_length≈5). See DIAG 2026-06-23 (base_xy far outside the arena at reset)."""
+        robot: Articulation = self.scene["robot"]
         base_ids, _ = robot.find_joints(
             ["dummy_base_prismatic_x_joint", "dummy_base_prismatic_y_joint",
              "dummy_base_revolute_z_joint"], preserve_order=True,
