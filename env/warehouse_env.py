@@ -57,12 +57,13 @@ from env.warehouse_reward import (
     under_rack_penalty,
 )
 from env.reward_pickup import (
-    approach_box_distance,
+    approach_box_shaped,
     box_dropped,
-    carry_distance,
+    carry_shaped,
     carry_regress_penalty,
     grasp_success_reward,
     drop_penalty,
+    pbs_step,
     pickup_delivered,
     pickup_delivered_reward,
 )
@@ -429,20 +430,23 @@ def _load_env_config() -> dict:
 class RewardsCfg:
     """Staged pick-place reward (see spec §4). Phase switches on env.holding.
 
-    Phase A (NOT holding): approach dense -0.02*dist(ee,box); grasp +5 one-shot.
-    Phase B (holding):     carry dense -0.02*dist(box,zone);  deliver +10 while in zone.
+    Phase A (NOT holding): approach PBS dist(ee,box); grasp +8 one-shot.
+    Phase B (holding):     carry  PBS dist(box,zone); deliver +15 while in zone.
     Always-on:             time -0.005; collision -2; idle -0.02; drop -2 one-shot.
 
-    Anti-freeze tuning (2026-06-21): approach/carry pull DOUBLED (-0.01→-0.02) so the dense draw to
-    the goal out-weighs the collision fear; collision HALVED (-5→-2) so the robot dares to explore
-    around the racks instead of freezing; idle -0.02/step makes standing still strictly worse than
-    careful movement. See docs/progress_p4.md.
+    PBS migration (2026-06-23): approach/carry now POTENTIAL-BASED (approach_box_shaped/carry_shaped,
+    Ng/Russell F=γΦ(s')−Φ(s), Φ=−dist). The dense total per episode now telescopes to ≈ Φ(start) =
+    start distance (BOUNDED, no 1000-step accumulation), so the old "worst-case -78/-182 dense drowns
+    the terminal bonus" problem is gone — and the per-step gradient stays full strength, so no freeze.
+    SIGN FLIPPED: shaped funcs return POSITIVE-when-progressing → weights are now POSITIVE (were -0.02
+    on raw +distance). Terminal bonuses raised (grasp 5→8, deliver 10→15) to clearly dominate the now-
+    bounded dense (~weight·start_dist ≈ +1.6 approach / +6 carry). Tune via reward_weights.yaml.
     """
 
-    approach  = RewTerm(func=approach_box_distance,   weight=-0.02)
-    grasp     = RewTerm(func=grasp_success_reward,    weight=5.0)
-    carry     = RewTerm(func=carry_distance,          weight=-0.02)
-    deliver   = RewTerm(func=pickup_delivered_reward, weight=10.0)
+    approach  = RewTerm(func=approach_box_shaped,     weight=0.4)    # PBS, POSITIVE weight (was -0.02 raw dist)
+    grasp     = RewTerm(func=grasp_success_reward,    weight=8.0)
+    carry     = RewTerm(func=carry_shaped,            weight=0.4)    # PBS, POSITIVE weight
+    deliver   = RewTerm(func=pickup_delivered_reward, weight=15.0)
     time_pen  = RewTerm(func=time_penalty,            weight=-0.005)
     collision = RewTerm(func=collision_penalty,       weight=2.0)   # func returns 0/-1; weight=2 → -2
     idle      = RewTerm(func=idle_penalty, params={"idle_steps": IDLE_PENALTY_STEPS}, weight=0.02)  # 0/-1 → -0.02 @5s
@@ -579,6 +583,15 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         # Carry-regress detector: consecutive holding steps with no progress toward the goal zone.
         self._carry_regress_steps = torch.zeros(N, device=dev)
         self._prev_carry_dist = torch.zeros(N, device=dev)
+        # Potential-based shaping (PBS) buffers — written once/step by _update_pbs_shaping, READ by
+        # reward_pickup.approach_box_shaped/carry_shaped. _*_active gates the spike at reset + phase
+        # boundary (emit only when active this step AND last step). See reward_pickup.pbs_step.
+        self._approach_shaping = torch.zeros(N, device=dev)
+        self._carry_shaping = torch.zeros(N, device=dev)
+        self._prev_approach_dist = torch.zeros(N, device=dev)
+        self._prev_carry_dist_pbs = torch.zeros(N, device=dev)
+        self._approach_active = torch.zeros(N, dtype=torch.bool, device=dev)
+        self._carry_active = torch.zeros(N, dtype=torch.bool, device=dev)
         # Reset-to-checkpoint (num_envs==1): a saved sim_state blob + the closest 2m ring captured.
         self._ckpt_valid = torch.zeros(N, dtype=torch.bool, device=dev)
         self._ckpt_ring = torch.zeros(N, device=dev)
@@ -712,6 +725,12 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         self._prev_carry_dist[env_ids_t] = torch.norm(
             self.box_pos[env_ids_t, :2] - self.goal_pos[env_ids_t, :2], dim=-1
         )
+        # PBS: zero the shaping + active flags so the first post-reset step emits 0 (prev_dist resyncs
+        # via the active guard) — no step-1 spike. Mirrors _carry_regress reset above.
+        self._approach_shaping[env_ids_t] = 0.0
+        self._carry_shaping[env_ids_t] = 0.0
+        self._approach_active[env_ids_t] = False
+        self._carry_active[env_ids_t] = False
         self._reanchor_arm(env_ids_t)   # active arm: re-home the EE target/smooth buffers at spawn
         # Fresh spawn just ran for ALL envs (a valid baseline). For a checkpoint restore, overwrite
         # env-0 with the saved state; if it throws, the env stays in the fresh spawn (fail-safe).
@@ -987,6 +1006,19 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
             stalling, self._carry_regress_steps + 1.0, torch.zeros_like(self._carry_regress_steps)
         )
         self._prev_carry_dist = cur
+
+    def _update_pbs_shaping(self) -> None:
+        """Compute this step's potential-based shaping for both phases (read next step by
+        approach_box_shaped / carry_shaped). Phase A active only while NOT holding (ee->box), Phase B
+        only while holding (box->zone); the active-flag guard in pbs_step zeroes the boundary spike.
+        Runs at step-end alongside _update_carry_progress → same one-step lag as carry_regress."""
+        not_holding = ~self.holding
+        d_a = torch.norm(self.ee_pos_world - self.box_pos, dim=-1)
+        self._approach_shaping, self._prev_approach_dist, self._approach_active = pbs_step(
+            self._prev_approach_dist, d_a, not_holding, self._approach_active)
+        d_b = torch.norm(self.box_pos[:, :2] - self.goal_pos[:, :2], dim=-1)
+        self._carry_shaping, self._prev_carry_dist_pbs, self._carry_active = pbs_step(
+            self._prev_carry_dist_pbs, d_b, self.holding, self._carry_active)
 
     def _update_checkpoint(self) -> None:
         """Snapshot the sim state (env 0) while carrying — at grasp and each closer CHECKPOINT_RING_M
@@ -1380,6 +1412,7 @@ class WarehouseGymEnv(gym.Env):
         self._env.update_grasp()                            # holding + grasp/drop events, carry box
         self._env._update_stuck()                           # idle detector for stuck_timeout reset
         self._env._update_carry_progress()                  # backing-up-from-zone detector
+        self._env._update_pbs_shaping()                     # potential-based approach/carry shaping
         self._env._update_checkpoint()                      # snapshot for reset-to-checkpoint
         # Surface the one-shot task events so consumers (recorder summary, P3 buffer) don't have to
         # reach into ._env. info gains 3 (N,) bool tensors; the (obs,r,term,trunc,info) shape is unchanged.

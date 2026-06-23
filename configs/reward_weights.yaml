@@ -13,12 +13,17 @@
 # Effective per-step / one-shot value shown in the comment.
 rewards:
   # ── Phase A: approach + grasp (NOT holding) ──
-  approach:  -0.02    # dense ee->box pull. ↑magnitude (e.g. -0.05) = clearer gradient to the box
-  grasp:      5.0     # one-shot when box grasped + lifted
+  # PBS (2026-06-23): approach/carry are now POTENTIAL-BASED (F=γΦ(s')−Φ(s), Φ=−dist). The func
+  # returns POSITIVE-when-nearing, so the weight is now POSITIVE (was -0.02 on raw +distance — a
+  # negative weight here would now PUNISH progress). The dense total per episode telescopes to
+  # ≈ weight·start_dist (BOUNDED, no 1000-step accumulation), so terminal bonuses dominate at the
+  # values below. ↑weight = stronger per-step pull. See env/reward_pickup.py PBS_GAMMA (=0.997).
+  approach:   0.4     # PBS ee->box. total ≈ 0.4·(~4 m) ≈ +1.6/episode
+  grasp:      8.0     # one-shot when box grasped + lifted (raised 5→8: dominates approach ~5x)
 
   # ── Phase B: carry + place (holding) ──
-  carry:     -0.02    # dense box->correct-zone pull
-  deliver:   10.0     # per-step while correct box sits in correct color zone
+  carry:      0.4     # PBS box->correct-zone. total ≈ 0.4·(~15 m) ≈ +6/episode
+  deliver:   15.0     # per-step while correct box sits in correct color zone (raised 10→15: dominates carry ~2.5x)
 
   # ── Always-on penalties ──
   time_pen:  -0.005  # per-step time cost. WAS -0.05 (×1000 steps = -50, dwarfs grasp+5/deliver+10 →

@@ -74,3 +74,43 @@ def pickup_delivered(env) -> torch.Tensor:
 def pickup_delivered_reward(env) -> torch.Tensor:
     """+1 per step while the held box is delivered in its zone (float of pickup_delivered)."""
     return pickup_delivered(env).float()
+
+
+# ── Potential-based shaping (Ng/Russell 1999) ─────────────────────────────────
+# Replaces the raw -w*dist dense terms (approach_box_distance / carry_distance), whose accumulation
+# scaled with the 1000-step horizon (worst-case -78 / -182, see training_readiness_2026-06-22 C3).
+# PBS reward F = γ·Φ(s') − Φ(s) with Φ = −dist telescopes: total over an episode ≈ Φ(start) − Φ(end)
+# = d_start (bounded by the start distance), INDEPENDENT of step count. So a wandering robot no longer
+# racks up unbounded dense cost, and the per-step gradient stays full strength (no freeze risk from
+# shrinking the weight). γ MUST match the agent's discount or invariance breaks — keep them in sync.
+PBS_GAMMA = 0.997  # == DreamerV3 discount (NM512 default 0.997). Change BOTH together.
+
+
+def pbs_step(prev_dist: torch.Tensor, cur_dist: torch.Tensor, active_now: torch.Tensor,
+             was_active: torch.Tensor, gamma: float = PBS_GAMMA):
+    """One PBS step. F = γΦ(s')−Φ(s), Φ=−dist  →  F = prev_dist − γ·cur_dist (>0 when distance shrank).
+
+    Emits shaping ONLY when the phase was active on BOTH this step and the previous one — that single
+    guard suppresses the spike at episode reset AND at a phase boundary (grasp flips the active phase),
+    where prev_dist is stale. Returns (shaping, new_prev_dist, new_active) for the caller to store.
+    Pure tensor op (no Isaac) so the env's _update_pbs_shaping stays unit-testable.
+    """
+    f = prev_dist - gamma * cur_dist
+    shaping = torch.where(active_now & was_active, f, torch.zeros_like(f))
+    return shaping, cur_dist, active_now
+
+
+def approach_box_shaped(env) -> torch.Tensor:
+    """Phase-A PBS reward, Φ=−dist(ee,box). Reads env._approach_shaping (set once/step by
+    WarehouseRLEnv._update_pbs_shaping — a pure READ so reward_debug re-calling it can't corrupt
+    state). POSITIVE when nearing the box → use with a POSITIVE weight (sign flipped vs the old
+    approach_box_distance, which used a negative weight on raw +distance)."""
+    s = getattr(env, "_approach_shaping", None)
+    return torch.zeros(env.num_envs, device=env.device) if s is None else s
+
+
+def carry_shaped(env) -> torch.Tensor:
+    """Phase-B PBS reward, Φ=−dist(box,zone). Reads env._carry_shaping. POSITIVE when nearing the
+    zone → use with a POSITIVE weight (sign flipped vs the old carry_distance)."""
+    s = getattr(env, "_carry_shaping", None)
+    return torch.zeros(env.num_envs, device=env.device) if s is None else s
