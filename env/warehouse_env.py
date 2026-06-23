@@ -1356,6 +1356,21 @@ class WarehouseGymEnv(gym.Env):
         if active_arm:
             self._env._drive_arm(ee3)
         obs, reward, terminated, truncated, info = self._env.step(internal)
+        # DIAG (temporary): on the first few terminations print WHICH DoneTerm fired + key state, to
+        # pin why episodes die at step 1. Rate-limited (8x), read-only. Remove once diagnosed.
+        try:
+            if bool(torch.as_tensor(terminated).any()) and getattr(self, "_diag_n", 0) < 8:
+                self._diag_n = getattr(self, "_diag_n", 0) + 1
+                tm = self._env.termination_manager
+                fired = [n for n in tm.active_terms if bool(tm.get_term(n)[0].item())]
+                from env.warehouse_reward import _contact_force
+                from isaaclab.managers import SceneEntityCfg
+                cf = float(_contact_force(self._env, SceneEntityCfg("contact_sensor"))[0])
+                print(f"[DIAG-term] ep_len={int(self._env.episode_length_buf[0])} fired={fired} "
+                      f"contactN={cf:.1f} holding={bool(self._env.holding[0])} "
+                      f"act={[round(float(x),2) for x in action[0].tolist()]}", flush=True)
+        except Exception as _e:
+            print(f"[DIAG-term] probe err: {_e}", flush=True)
         if active_arm:
             self._env._freeze_held_arm()                    # carry: pin held envs' arm to the grab pose
         else:
