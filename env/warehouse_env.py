@@ -152,6 +152,14 @@ CHECKPOINT_RING_M = 2.0
 # checkpoint again. Until the restore weld is made snap-free + verified in sim, failures fall back
 # to a normal fresh spawn (the proven path). Flip True to re-enable.
 ENABLE_RESET_TO_CHECKPOINT = False
+# DISABLED 2026-06-23: active-arm (Lane B) under RL exploration diverges — raw policy EE deltas
+# drive the IK into configs the stiff Franka actuators (hand stiffness 1e5) chase with absurd force
+# (contact spikes to 1e6-1e8 N at step 0 → crashed/bounds fire → train_length 1.0). Gentle teleop
+# never hit this; aggressive RL actions do. Training falls back to the PROVEN frozen-arm + magnetic
+# grasp (Jalan A): arm pinned to home, base drives the hand near the box, grasp on proximity. The
+# EE action channels are ignored. Flip True only after the active arm is stabilised under RL.
+# (arm_active=True, e.g. drive_env teleop, still drives the arm regardless of this flag.)
+ENABLE_ACTIVE_ARM = False
 
 
 # ── Custom Observation Functions ──────────────────────────────────────
@@ -1352,7 +1360,7 @@ class WarehouseGymEnv(gym.Env):
         # override; FROZEN for stage 1 (pre-grasped nav — isolates carry from arm motion). _drive_arm
         # sets the arm joint targets BEFORE the step (the PD tracks them across the decimation substeps);
         # _freeze_held_arm hard-pins held envs after (box welded to base_link, hand must not drift).
-        active_arm = self.arm_active or self._env.stage >= STAGE_GRASP
+        active_arm = self.arm_active or (ENABLE_ACTIVE_ARM and self._env.stage >= STAGE_GRASP)
         if active_arm:
             self._env._drive_arm(ee3)
         obs, reward, terminated, truncated, info = self._env.step(internal)
