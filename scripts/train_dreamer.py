@@ -47,6 +47,27 @@ AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True
 
+# ── cuDNN warm-up BEFORE AppLauncher (vast.ai / RTX 4090 fix) ─────────────────
+# On some container + new-driver combos (CUDA 12.9 / driver 575, torch 2.7+cu128), if Omniverse Kit
+# grabs the CUDA/Vulkan context first, cuDNN's lazy handle init later fails with
+# CUDNN_STATUS_NOT_INITIALIZED at the first F.conv2d (its internal cudaGetDeviceCount sees GPU=NULL)
+# even though CUDA itself is healthy. Forcing torch to build the cuDNN handle HERE — before
+# AppLauncher launches Kit — sidesteps it, so we keep cuDNN enabled (fast) instead of the slow
+# torch.backends.cudnn.enabled=False workaround. No-op without CUDA. See the cuDNN-init bug note.
+try:
+    import torch
+
+    if torch.cuda.is_available():
+        torch.backends.cudnn.enabled = True
+        _ = torch.nn.functional.conv2d(
+            torch.zeros(1, 1, 8, 8, device="cuda"),
+            torch.zeros(1, 1, 3, 3, device="cuda"),
+        )
+        torch.cuda.synchronize()
+        print("[train_dreamer] cuDNN warm-up OK (handle created before AppLauncher).")
+except Exception as exc:  # never block training on the warm-up — fall through to AppLauncher
+    print(f"[train_dreamer] cuDNN warm-up skipped: {exc}")
+
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
