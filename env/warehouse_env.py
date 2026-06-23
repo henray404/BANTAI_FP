@@ -146,6 +146,12 @@ CARRY_PROGRESS_EPS_M = 0.02
 # the last checkpoint instead of the far spawn — speeds up training without breaking the world model
 # (a clean done, not a mid-episode teleport). Success / time-out / no-checkpoint → fresh spawn.
 CHECKPOINT_RING_M = 2.0
+# DISABLED 2026-06-23: reset-to-checkpoint caused an infinite 1-step-episode loop on the 4090 run —
+# a failure near the box restores the holding checkpoint, the re-welded grasp_joint snaps
+# ("disjointed body transforms") and instantly re-trips crashed/dropped, restoring the SAME
+# checkpoint again. Until the restore weld is made snap-free + verified in sim, failures fall back
+# to a normal fresh spawn (the proven path). Flip True to re-enable.
+ENABLE_RESET_TO_CHECKPOINT = False
 
 
 # ── Custom Observation Functions ──────────────────────────────────────
@@ -670,7 +676,8 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         # fresh flow clobbers state; preserve the carried-box target identity to revert after.
         _do_restore = False
         _saved_target = None
-        if (self.num_envs == 1 and 0 in env_ids_t.tolist() and bool(self._ckpt_valid[0])
+        if (ENABLE_RESET_TO_CHECKPOINT
+                and self.num_envs == 1 and 0 in env_ids_t.tolist() and bool(self._ckpt_valid[0])
                 and bool(failure_reset(self)[0])):
             _do_restore = True
             _saved_target = (self.target_box_name[0], self.box_cat_idx[0].clone(),
@@ -974,7 +981,7 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         """Snapshot the sim state (env 0) while carrying — at grasp and each closer CHECKPOINT_RING_M
         ring to the goal. Restored on a failure reset so the next episode resumes near the goal.
         num_envs==1 only (reuses recording.sim_state, which is env-0 scoped)."""
-        if self.num_envs != 1 or not bool(self.holding[0]):
+        if not ENABLE_RESET_TO_CHECKPOINT or self.num_envs != 1 or not bool(self.holding[0]):
             return
         dist = float(torch.norm(self.box_pos[0, :2] - self.goal_pos[0, :2]))
         ring = int(dist // CHECKPOINT_RING_M)
