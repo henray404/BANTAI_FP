@@ -53,6 +53,11 @@ class SB3WarehouseEnv(gym.Env):
             "SB3 drives a single env; use VecEnv stacking at the SB3 layer instead."
         )
         self._env = warehouse_env
+        # IsaacLab's ManagerBasedRLEnv auto-resets a done env INSIDE step() and returns the
+        # fresh-episode obs. SB3's VecEnv then calls reset() again on done — a redundant SECOND
+        # reset that skips an episode + desyncs _last_obs. We cache the auto-reset obs here and
+        # hand it back from reset() so the boundary is a single, consistent reset.
+        self._autoreset_obs: dict | None = None
         # obs_v2 + pickup action contract (6,): [base_lin, base_ang, ee_dx, ee_dy, ee_dz, gripper]
         self.action_space = spaces.Box(-1.0, 1.0, shape=(6,), dtype=np.float32)
 
@@ -82,8 +87,17 @@ class SB3WarehouseEnv(gym.Env):
         return out
 
     def reset(self, *, seed: int | None = None, options=None):
-        """Reset underlying env; return (obs, info)."""
+        """Reset underlying env; return (obs, info).
+
+        If the underlying env already auto-reset on the previous done step, hand back that
+        fresh-episode obs instead of resetting a SECOND time (both are valid uniformly-random
+        episode starts; the double reset just wasted a sim reset and desynced _last_obs).
+        """
         super().reset(seed=seed)
+        if self._autoreset_obs is not None:
+            obs = self._autoreset_obs
+            self._autoreset_obs = None
+            return obs, {}
         obs, info = self._env.reset(seed=seed)
         return self._convert(obs), dict(info) if isinstance(info, dict) else {}
 
@@ -94,7 +108,11 @@ class SB3WarehouseEnv(gym.Env):
         r = float(_np(reward).reshape(-1)[0])
         term = bool(_np(terminated).reshape(-1)[0])
         trunc = bool(_np(truncated).reshape(-1)[0])
-        return self._convert(obs), r, term, trunc, {}
+        conv = self._convert(obs)
+        # On done, `conv` is already the auto-reset (next-episode) obs — cache it so the VecEnv's
+        # follow-up reset() returns it rather than triggering a redundant second reset.
+        self._autoreset_obs = conv if (term or trunc) else None
+        return conv, r, term, trunc, {}
 
     def render(self):
         """Return env-0 camera RGB (uint8 HWC)."""
