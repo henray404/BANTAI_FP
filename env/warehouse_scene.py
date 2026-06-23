@@ -191,6 +191,13 @@ RIDGEBACK_FRANKA_CFG = ArticulationCfg(
             # it is a numerical blowup. Matches the box's proven cap (1.0). The box already had this;
             # the robot articulation did not. Bump to ~5.0 if depenetration is too slow after testing.
             max_depenetration_velocity=1.0,
+            # STABILITY FIX 2 (2026-06-24): cap absolute body velocity. The recurring crash is a
+            # CUDA error-700 in GpuArticulationView (corrupt robot articulation state) after a few
+            # minutes — the signature of a chassis/link velocity running away to inf -> NaN DOF
+            # state. Normal base speed is 1.5 m/s, so these caps never clip real motion; they only
+            # stop a numerical runaway from poisoning the articulation. Tighten if it still crashes.
+            max_linear_velocity=5.0,      # m/s
+            max_angular_velocity=10.0,    # rad/s
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False,
