@@ -1,0 +1,43 @@
+# env_config_s4.yaml — s4 TRANSFER TEST scene (eval-only; best model, never trained here).
+#
+# s4 = scenario 4 of the study: take the best model from s1 (PPO) / s2 (DreamerV3) /
+# s3 (DreamerV3 + CA-SLOPE) and evaluate it on a MODIFIED warehouse it never saw, to measure
+# generalization. Run via scripts/eval_s4.py, which sets $WAREHOUSE_ENV_CONFIG to this file.
+#
+# Only the `scene:` block below is consulted from this file (env/warehouse_scene._scene_block reads
+# the override). Robot, reward, termination, episode length, etc. all stay IDENTICAL to the training
+# env (configs/env_config.yaml) — so the only thing that changes between training and s4 is the scene.
+#
+# Two changes vs the training scene (user request 2026-06-23):
+#   1. PHYSICALLY SMALLER RACK — Rack_L01 USD scale 0.01 -> 0.007 (30% smaller). Shrinking the rack
+#      lowers every shelf surface, which is the point: it drops the 2nd (mid) shelf into Franka reach.
+#      Shelf surfaces scale with it: bottom 0.7235->0.506 m, MID 1.3253->0.928 m, top 1.926->1.348 m.
+#   2. EXTRA BOX ON THE 2ND SHELF LEVEL — each chosen rack keeps its bottom-shelf box AND gets an
+#      ADDITIONAL box on shelf level 1 (mid). The new box is randomized on reset exactly like the
+#      bottom box. The model trained only on bottom-shelf boxes; here it must also grasp from a new
+#      height. Mid-shelf box center z = 0.928 + size/2 (within ~1.35 m Franka reach).
+#
+# NOTE (sim-verify, Blackwell-blocked): the mid-shelf grasp geometry + the shrunk rack collider need
+# a sim check on the Linux/A100 box. If the arm can't reach the mid shelf, lower `racks.scale`
+# (e.g. 0.006) to bring the mid shelf down further, or set second_shelf_box.shelf_level: 0.
+
+scene:
+  num_boxes: 3          # same 3-box subset as training (VRAM); box i sits at rack i
+  spawn_props: false    # skip decorative props (VRAM)
+
+  racks:
+    scale: 0.007        # 0.01 = training size; 0.007 = 30% smaller (whole rack physically smaller)
+
+  # ADD a second box on a higher shelf LEVEL (the s4 "box on the 2nd shelf"), randomized like the
+  # bottom box. The bottom-shelf boxes stay as-is.
+  second_shelf_box:
+    enabled: true
+    racks: all          # every active rack gets an extra mid-shelf box (fragile/regular/heavy)
+    shelf_level: 1      # 0=bottom, 1=mid (2nd shelf), 2=top
+
+  # Shuffle WHICH box sits on WHICH (rack, shelf) slot, so any shelf can hold any size — not the
+  # fixed small/medium/big order. Size stays baked to each box (Isaac can't resize at runtime); the
+  # box just moves to a random slot. seed: null = different layout each launch; int = reproducible.
+  randomize_placement:
+    enabled: true
+    seed: null

@@ -46,7 +46,15 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.sensors import TiledCamera
 from isaaclab.utils import configclass
 
-from env.warehouse_scene import ITEM_SPECS, SHELF_DECK_SIZE, ZONE_SPECS, WarehouseSceneCfg
+from env.warehouse_scene import (
+    ITEM_SPECS,
+    RACK_SHELF_LEVELS,
+    S4_RANDOMIZE_PLACEMENT,
+    S4_SLOTS,
+    SHELF_DECK_SIZE,
+    ZONE_SPECS,
+    WarehouseSceneCfg,
+)
 from env.warehouse_reward import (
     collided,
     collision_penalty,
@@ -645,6 +653,27 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
             return
         n = env_ids.numel()
         margin = 0.02  # safety gap from shelf edge (meters)
+
+        # Per-episode placement (s4 only): each reset re-assign WHICH box sits on WHICH (rack, shelf)
+        # slot, so any shelf can hold any size. Size stays baked to the box; only its (x,y,z) moves.
+        # Target selection (by name) + box_pos (read from live sim pose) stay correct. One permutation
+        # per reset (num_envs==1 here); training path (flag off) is unchanged below.
+        if S4_RANDOMIZE_PLACEMENT and len(S4_SLOTS) == len(ITEM_SPECS):
+            perm = torch.randperm(len(S4_SLOTS))
+            for k, (box_name, size, _mass, _pos) in enumerate(ITEM_SPECS):
+                sx, sy, level = S4_SLOTS[int(perm[k])]
+                sz = RACK_SHELF_LEVELS[int(level)] + size / 2.0
+                jlim_x = max(0.0, SHELF_DECK_SIZE[0] / 2.0 - size / 2.0 - margin)
+                jlim_y = max(0.0, SHELF_DECK_SIZE[1] / 2.0 - size / 2.0 - margin)
+                jx = (torch.rand(n, device=self.device) * 2.0 - 1.0) * jlim_x
+                jy = (torch.rand(n, device=self.device) * 2.0 - 1.0) * jlim_y
+                state = torch.zeros(n, 13, device=self.device)
+                state[:, 0] = self.scene.env_origins[env_ids, 0] + sx + jx
+                state[:, 1] = self.scene.env_origins[env_ids, 1] + sy + jy
+                state[:, 2] = self.scene.env_origins[env_ids, 2] + sz + 0.05  # 5cm above deck
+                state[:, 3] = 1.0  # qw — upright
+                self.scene[box_name].write_root_state_to_sim(state, env_ids=env_ids)
+            return
 
         for box_name, size, _mass, pos in ITEM_SPECS:
             box = self.scene[box_name]

@@ -51,7 +51,11 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from env.layout_grid import (
     RACK_POSITIONS as _RACK_POSITIONS_LG,
     TARGET_BOX_SPECS as _TARGET_BOX_SPECS_LG,
+    extra_shelf_box_specs,
     island_rack_positions,
+    rest_box_specs,
+    scale_shelf_levels,
+    shuffled_box_layout,
 )
 
 
@@ -60,15 +64,54 @@ from env.layout_grid import (
 # windowed it OOMs (BAR1 aperture full -> PhysX CUDA error 700, see bugs_errors). These spawn a
 # SUBSET so a single-box stage (Stage 2) fits: fewer rigid bodies + material binds + GPU contact
 # pairs. From configs/env_config.yaml `scene:` (num_boxes <= 0 / absent = ALL; spawn_props bool).
-def _scene_knobs() -> tuple[int, bool]:
-    """(num_boxes, spawn_props) from env_config.yaml `scene:`. Safe defaults = (0=all, True)."""
-    cfg_path = Path(__file__).resolve().parents[1] / "configs" / "env_config.yaml"
+def _env_config_path() -> Path:
+    """Active env-config YAML path.
+
+    Defaults to configs/env_config.yaml; `$WAREHOUSE_ENV_CONFIG` overrides it (used by the s4
+    transfer-test eval, scripts/eval_s4.py, to load configs/env_config_s4.yaml without touching the
+    training config). Falls back to the default if the override path does not exist.
+    """
+    import os
+    default = Path(__file__).resolve().parents[1] / "configs" / "env_config.yaml"
+    override = os.environ.get("WAREHOUSE_ENV_CONFIG", "").strip()
+    if override:
+        p = Path(override)
+        if p.exists():
+            return p
+    return default
+
+
+def _scene_block() -> dict:
+    """The `scene:` mapping from the active env-config YAML ({} on any read/parse failure)."""
     try:
         import yaml
-        scene = ((yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}).get("scene", {}) or {})
-        return int(scene.get("num_boxes", 0) or 0), bool(scene.get("spawn_props", True))
+        doc = yaml.safe_load(_env_config_path().read_text(encoding="utf-8")) or {}
+        return (doc.get("scene", {}) or {})
     except Exception:   # missing/locked/malformed yaml must never block scene construction
-        return 0, True
+        return {}
+
+
+def _scene_knobs() -> tuple[int, bool]:
+    """(num_boxes, spawn_props) from the active env-config `scene:`. Safe defaults = (0=all, True)."""
+    scene = _scene_block()
+    return int(scene.get("num_boxes", 0) or 0), bool(scene.get("spawn_props", True))
+
+
+def _rack_knobs() -> tuple[float, dict]:
+    """(rack_scale, second_shelf_box) for the s4 transfer test.
+
+    rack_scale = `scene.racks.scale` (default 0.01 = training rack size; s4 shrinks it, e.g. 0.008).
+    second_shelf_box = `scene.second_shelf_box` mapping {enabled, rack_idx, shelf_level} — rests one
+    target box on a higher shelf LEVEL (1=mid) of its rack. {} / disabled = bottom shelf as usual.
+    """
+    scene = _scene_block()
+    racks = (scene.get("racks", {}) or {})
+    try:
+        scale = float(racks.get("scale", 0.01) or 0.01)
+    except (TypeError, ValueError):
+        scale = 0.01
+    second = (scene.get("second_shelf_box", {}) or {})
+    return scale, (second if isinstance(second, dict) else {})
 
 
 def _balanced_box_subset(specs: list, n: int) -> list:
@@ -79,6 +122,7 @@ def _balanced_box_subset(specs: list, n: int) -> list:
 
 
 _NUM_BOXES, _SPAWN_PROPS = _scene_knobs()
+RACK_SCALE, _SECOND_SHELF = _rack_knobs()   # 0.01 = training size; s4 shrinks the rack
 
 
 # ── Asset Paths ───────────────────────────────────────────────────────
@@ -309,11 +353,16 @@ ACTIVE_RACK_POSITIONS = RACK_POSITIONS if _NUM_BOXES <= 0 else RACK_POSITIONS[:_
 # Solid CuboidCfg shelf decks are spawned at these heights via _shelf_deck_cfg().
 # Boxes fall from z=2.8m and land on the top deck (RACK_SHELF_LEVELS[-1]).
 # Tune these values if boxes miss the deck: RACK_SHELF_LEVELS[2] should match actual top shelf.
-RACK_SHELF_LEVELS = (0.72351, 1.32528, 1.92566)  # measured shelf surface z (bottom/mid/top)
+_BASE_SHELF_LEVELS = (0.72351, 1.32528, 1.92566)  # measured @ RACK_SCALE 0.01 (bottom/mid/top)
+# Shelf surfaces follow the rack USD scale: shrinking the rack (s4) lowers every shelf. At the
+# default 0.01 this is identical to the measured values (factor 1.0).
+RACK_SHELF_LEVELS = scale_shelf_levels(_BASE_SHELF_LEVELS, RACK_SCALE)
 
 # Shelf deck geometry — covers interior of rack frame without hitting uprights.
 # 0.70m × 0.70m square = orientation-agnostic (rack long axis unknown without USD inspection).
 SHELF_DECK_SIZE = (0.70, 0.70, 0.02)     # (width_x, depth_y, thickness_z) in meters
+if RACK_SCALE != 0.01:                    # s4: shrink the deck with the rack so boxes sit on it, not over the edge
+    SHELF_DECK_SIZE = tuple(d * (RACK_SCALE / 0.01) for d in SHELF_DECK_SIZE)
 # Deck colour — red to match the rack frame. Tune to the exact rack USD red if needed.
 # WARNING: visual materials on all 54 decks add material nodes; on Blackwell RTX 5050 this can
 # re-trigger the camera SDP crash (bugs_errors/2026-05-22_sdp-camera-crash-blackwell.md, "108
@@ -345,9 +394,59 @@ RACK_COLLIDER_COLOR   = None                # None = collision-only (no material
 # Boxes are graspable rigid bodies; the commanded box is selected at runtime by goal_id.
 # Sourced from layout_grid (pure-Python) so tests can verify specs without Isaac Sim.
 # Subset to _NUM_BOXES (category-balanced) when set in env_config.yaml; 0 = all 18 (default).
-TARGET_BOX_SPECS: list[tuple[str, float, float, tuple[float, float, float]]] = _balanced_box_subset(
-    _TARGET_BOX_SPECS_LG, _NUM_BOXES
-)
+def _second_shelf_rack_idxs(racks_cfg, n: int) -> list[int]:
+    """Resolve second_shelf_box.racks → active rack indices. None/'all' = every active rack."""
+    if racks_cfg in (None, "all"):
+        return list(range(n))
+    if isinstance(racks_cfg, int):
+        return [racks_cfg] if 0 <= racks_cfg < n else []
+    return [int(r) for r in racks_cfg if 0 <= int(r) < n]
+
+
+# s4 per-episode placement randomizer, consumed by env/warehouse_env._randomize_box_poses.
+# S4_RANDOMIZE_PLACEMENT = on/off; S4_SLOTS = [(x, y, shelf_level_index), ...] one slot per box, so
+# the env re-shuffles WHICH box sits on WHICH slot every reset. Defaults = off / empty (training).
+S4_RANDOMIZE_PLACEMENT = False
+S4_SLOTS: list = []
+
+_BOX_SUBSET = _balanced_box_subset(_TARGET_BOX_SPECS_LG, _NUM_BOXES)
+_SECOND_SHELF_ON = bool(_SECOND_SHELF.get("enabled", False))
+if RACK_SCALE != 0.01 or _SECOND_SHELF_ON:
+    # s4 transfer env: the rack is physically smaller, so drop every existing box onto the SCALED
+    # bottom shelf, then ADD a second box on a higher shelf level (default mid) of the chosen racks.
+    # Each added box keeps the rack's category + gets a unique name, so the env commands it as a
+    # target and randomizes its x,y on reset exactly like the bottom-shelf boxes.
+    # The rack shrank, so the boxes + shelf decks must shrink with it (same factor) — otherwise a
+    # full-size box overflows the smaller rack and clips through its frame. Category is commanded by
+    # goal_id (CLIP/YOLO removed), so scaling the physical box size is safe.
+    _sf = RACK_SCALE / 0.01
+    _scaled_subset = [(n, s * _sf, m, p) for (n, s, m, p) in _BOX_SUBSET]
+    _bottom = rest_box_specs(_scaled_subset, RACK_SHELF_LEVELS, level=0)
+    _extra: list = []
+    _mid_idxs: list[int] = []
+    if _SECOND_SHELF_ON:
+        _mid_idxs = _second_shelf_rack_idxs(_SECOND_SHELF.get("racks", [0]), len(_scaled_subset))
+        _level = int(_SECOND_SHELF.get("shelf_level", 1))
+        _extra = extra_shelf_box_specs(_scaled_subset, RACK_SHELF_LEVELS, _mid_idxs, _level)
+    TARGET_BOX_SPECS = _bottom + _extra
+
+    # Optional placement randomizer (s4): shuffle WHICH box sits on WHICH (rack, shelf) slot, so any
+    # shelf can hold any size — not the fixed small/medium/big order. Size travels with the box.
+    _PLACEMENT = (_scene_block().get("randomize_placement", {}) or {})
+    if bool(_PLACEMENT.get("enabled", False)):
+        _bottom_lvl = 0
+        _mid_lvl = int(_SECOND_SHELF.get("shelf_level", 1)) if _SECOND_SHELF_ON else None
+        _slots = [(x, y, _bottom_lvl) for (_n, _s, _m, (x, y, _z)) in _bottom]
+        if _mid_lvl is not None:
+            _slots += [(_scaled_subset[i][3][0], _scaled_subset[i][3][1], _mid_lvl) for i in _mid_idxs]
+        _seed = _PLACEMENT.get("seed", None)
+        _seed = int(_seed) if _seed is not None else None
+        # initial spawn layout (shuffled once); the env re-shuffles these same slots every reset.
+        TARGET_BOX_SPECS = shuffled_box_layout(TARGET_BOX_SPECS, _slots, RACK_SHELF_LEVELS, _seed)
+        S4_SLOTS = _slots
+        S4_RANDOMIZE_PLACEMENT = True
+else:
+    TARGET_BOX_SPECS = _BOX_SUBSET
 
 # Back-compat alias: env code iterates ITEM_SPECS.
 ITEM_SPECS = TARGET_BOX_SPECS
@@ -388,12 +487,12 @@ def _wall_cfg(name: str, pos: tuple, size: tuple) -> AssetBaseCfg:
 
 
 def _rack_cfg(idx: int, pos: tuple) -> AssetBaseCfg:
-    """Static Rack_L01 USD (cm-authored -> scale 0.01; verify height via explore_rack.py)."""
+    """Static Rack_L01 USD (cm-authored -> scale RACK_SCALE; s4 shrinks it. verify via explore_rack.py)."""
     return AssetBaseCfg(
         prim_path=f"{{ENV_REGEX_NS}}/Rack_{idx}",
         spawn=sim_utils.UsdFileCfg(
             usd_path=RACK_USD,
-            scale=(0.01, 0.01, 0.01),
+            scale=(RACK_SCALE, RACK_SCALE, RACK_SCALE),
             collision_props=sim_utils.CollisionPropertiesCfg(),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(pos=pos),
