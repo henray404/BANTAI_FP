@@ -76,7 +76,13 @@ def main() -> None:
             category_aware=(cs["mode"] == "category"),
         )
         warehouse = CASlopeEnvWrapper(warehouse, shaper=shaper, mode=cs["mode"])
-    sb3_env = SB3WarehouseEnv(warehouse)
+    # Monitor records episode reward/length into the SB3 logger -> TB gets
+    # rollout/ep_rew_mean + rollout/ep_len_mean (without it the ep_info_buffer stays empty
+    # and only train/* losses are logged — no way to see if episodes collapse to length ~5).
+    # Eval uses the INNER env (bypasses Monitor) so eval episodes don't pollute train stats.
+    from stable_baselines3.common.monitor import Monitor
+    inner_env = SB3WarehouseEnv(warehouse)
+    sb3_env = Monitor(inner_env)
 
     if args_cli.algo == "sac":
         from training.baselines.sac import build_sac
@@ -129,7 +135,7 @@ def main() -> None:
 
     _best = BestModelTracker(logdir)
     callbacks = [EvalSuccessCallback(
-        sb3_env, EvalCsv(logdir), _best, TrajectoryRecorder(_best.dir),
+        inner_env, EvalCsv(logdir), _best, TrajectoryRecorder(_best.dir),
         settings.budget["eval_every"], settings.budget["eval_episodes"])]
     if args_cli.wandb:
         try:

@@ -56,6 +56,22 @@ def build_command(cfg: ExperimentConfig, seed: int, logdir: Path, steps: int,
     return cmd
 
 
+def eval_data_rows(logdir: Path) -> list[str]:
+    """Return the data rows (header excluded) of a run's eval_metrics.csv; [] if none.
+
+    A run is only genuinely DONE if it logged at least one periodic eval. Isaac's
+    simulation_app.close() can hard-exit a crashed run with code 0 (e.g. an exception at
+    the FIRST eval), which subprocess.run then reports as rc=0 — a false success. Gating the
+    DONE marker on real eval rows catches that: a run that exits 0 but logged nothing is
+    recorded as a failure (no DONE), so it stays resumable instead of being silently skipped.
+    """
+    csv = logdir / "eval_metrics.csv"
+    if not csv.exists():
+        return []
+    lines = csv.read_text(encoding="utf-8").splitlines()
+    return [ln for ln in lines[1:] if ln.strip()]
+
+
 def main() -> None:
     """Parse CLI, iterate the run schedule, launch each as a resumable subprocess."""
     ap = argparse.ArgumentParser(description="Run the 18-run ablation sequentially")
@@ -123,17 +139,27 @@ def main() -> None:
         dt = time.time() - t0
 
         if rc == 0:
-            done.write_text(f"ok steps={steps} seconds={dt:.0f}\n", encoding="utf-8")
-            print(f"{tag}: OK ({dt:.0f}s)\n")
+            rows = eval_data_rows(logdir)
+            if not rows:
+                # Exited 0 but logged no eval data -> Isaac close() likely masked a mid-run
+                # crash (classically the first periodic eval). Do NOT mark DONE; keep resumable.
+                failures.append((tag, "rc=0 but NO eval rows (crash masked as success)"))
+                print(f"{tag}: NO EVAL DATA despite rc=0 -> not marking DONE ({dt:.0f}s)\n")
+            else:
+                last_step = rows[-1].split(",")[0]
+                done.write_text(
+                    f"ok requested_steps={steps} eval_rows={len(rows)} "
+                    f"last_eval_step={last_step} seconds={dt:.0f}\n", encoding="utf-8")
+                print(f"{tag}: OK ({len(rows)} eval rows, last@{last_step}, {dt:.0f}s)\n")
         else:
-            failures.append((tag, rc))
+            failures.append((tag, f"rc={rc}"))
             print(f"{tag}: FAILED rc={rc} ({dt:.0f}s)\n")
 
     print("\n[run_all] complete.")
     if failures:
         print(f"[run_all] {len(failures)} failed:")
-        for tag, rc in failures:
-            print(f"  {tag} (rc={rc})")
+        for tag, reason in failures:
+            print(f"  {tag} ({reason})")
     print("[run_all] aggregate with:  python -m experiments.analyze "
           f"--results {results}")
 
