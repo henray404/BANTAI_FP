@@ -117,9 +117,14 @@ def out_of_bounds(
     half_extent_x: float = 9.5,
     half_extent_y: float = 14.5,
 ) -> torch.Tensor:
-    """Termination: True if robot leaves the rectangular room interior."""
+    """Termination: True if robot leaves the rectangular room interior.
+
+    Grace-gated: a step-0 contact transient can fling the chassis out before the spawn settles, so
+    bounds is suppressed for the first RESET_GRACE_STEPS (spawn is always in-bounds by config).
+    """
     xy = _robot_xy(env, asset_cfg)
-    return (xy[:, 0].abs() > half_extent_x) | (xy[:, 1].abs() > half_extent_y)
+    oob = (xy[:, 0].abs() > half_extent_x) | (xy[:, 1].abs() > half_extent_y)
+    return oob & _past_grace(env)
 
 
 # ── Failure resets + penalties (2026-06-23) ───────────────────────────
@@ -131,6 +136,10 @@ COLLIDE_RESET_N = 50.0
 RACK_HALF_X = 0.70
 RACK_HALF_Y = 0.55
 NO_GRASP_TIMEOUT_STEPS = 300   # 30 s @ 10 Hz with no grasp -> reset (arm-first focus)
+# Spawn-settle grace: the teleport/reset's first physics steps spike chassis contact (a few kN) as
+# PhysX resolves initial floor/penetration — that tripped crashed/bounds at ep_len 0 (DIAG 2026-06-23).
+# Suppress the failure terminations for the first RESET_GRACE_STEPS so the spawn settles first.
+RESET_GRACE_STEPS = 5
 
 
 def _contact_force(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -139,13 +148,26 @@ def _contact_force(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.
     return sensor.data.net_forces_w_history[:, 0, :, :].norm(dim=-1).amax(dim=-1)
 
 
+def _past_grace(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """(N,) bool: episode past the spawn-settle window — gate failure terminations with this so a
+    step-0 teleport/contact transient can't end the episode. All-True if episode_length_buf absent."""
+    n = getattr(env, "episode_length_buf", None)
+    if n is None:
+        return torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    return n >= RESET_GRACE_STEPS
+
+
 def collided(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_sensor"),
     threshold_n: float = COLLIDE_RESET_N,
 ) -> torch.Tensor:
-    """Termination: chassis contact force above the CRASH threshold (auto-reset on nabrak)."""
-    return _contact_force(env, sensor_cfg) > threshold_n
+    """Termination: chassis contact force above the CRASH threshold (auto-reset on nabrak).
+
+    Suppressed during the spawn-settle grace window (RESET_GRACE_STEPS) so the reset teleport's
+    initial contact transient doesn't false-trip it at ep_len 0.
+    """
+    return (_contact_force(env, sensor_cfg) > threshold_n) & _past_grace(env)
 
 
 def _rack_xy(env: ManagerBasedRLEnv) -> torch.Tensor:
