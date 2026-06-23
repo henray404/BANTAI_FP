@@ -43,6 +43,11 @@ parser.add_argument("--stage", type=int, default=3,
                     help="Curriculum stage 1-4 (1=nav/pre-grasped, 2=grasp/spawn-near-box, "
                          "3=full chain [default], 4=full+goal-anneal). Fixed for the run — the "
                          "vendor loop does not auto-advance. Start at 2 to isolate approach+grasp.")
+parser.add_argument("--curriculum", type=str, default=None,
+                    help="Step-based curriculum auto-advance; overrides --stage. Format "
+                         "'stage:frac,...' where frac is a fraction of --steps, e.g. "
+                         "'2:0.0,3:0.5' = stage 2 from the start then stage 3 from 50%% of steps. "
+                         "'1:0.0,2:0.3,3:0.6' = nav->grasp->full.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True
@@ -105,8 +110,15 @@ def _build_shared_env():
         # Curriculum stage (fixed for the run; vendor loop has no success-gate to auto-advance).
         # set_stage validates 1-4 and applies on the next reset (the dreamer loop resets before
         # stepping). _env is the underlying WarehouseRLEnv exposing the curriculum API.
-        raw._env.set_stage(args_cli.stage)
-        print(f"[curriculum] stage fixed at {args_cli.stage}", flush=True)
+        if args_cli.curriculum:
+            # 'stage:frac,...' -> [(step_threshold, stage), ...]; frac is a fraction of total steps.
+            sched = [(int(float(frac) * args_cli.steps), int(st))
+                     for st, frac in (p.split(":") for p in args_cli.curriculum.split(","))]
+            raw.set_stage_schedule(sched)
+            print(f"[curriculum] auto-advance schedule (step,stage)={sched}", flush=True)
+        else:
+            raw._env.set_stage(args_cli.stage)
+            print(f"[curriculum] stage fixed at {args_cli.stage}", flush=True)
         _SHARED_ENV["success"] = raw
         if args_cli.ca_slope:
             cs = _SETTINGS.ca_slope

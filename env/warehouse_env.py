@@ -1024,6 +1024,13 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
         d_b = torch.norm(self.box_pos[:, :2] - self.goal_pos[:, :2], dim=-1)
         self._carry_shaping, self._prev_carry_dist_pbs, self._carry_active = pbs_step(
             self._prev_carry_dist_pbs, d_b, self.holding, self._carry_active)
+        # SAFETY CLAMP (2026-06-24): a base/box physics-divergence position spike can blow the raw
+        # distance — and thus the PBS term — into the thousands, which the policy then reward-hacks
+        # (episode return scaled with length, success stayed 0). Bound per-step shaping so one bad
+        # step can't dominate the return. Normal per-step |Δdist| << 1 m, so ±1.0 never clips real
+        # shaping; it only catches divergence. Does NOT fix the divergence itself (physics) — masks it.
+        self._approach_shaping = self._approach_shaping.clamp(-1.0, 1.0)
+        self._carry_shaping = self._carry_shaping.clamp(-1.0, 1.0)
 
     def _update_checkpoint(self) -> None:
         """Snapshot the sim state (env 0) while carrying — at grasp and each closer CHECKPOINT_RING_M
@@ -1321,6 +1328,11 @@ class WarehouseGymEnv(gym.Env):
         self.cfg = cfg if cfg is not None else WarehouseEnvCfg()
         self.arm_active = arm_active
         self._env = WarehouseRLEnv(cfg=self.cfg, render_mode=render_mode)
+        # Curriculum auto-advance (step-based). Empty schedule = DISABLED (fixed stage via set_stage,
+        # i.e. legacy behavior). Enabled by set_stage_schedule(); see _maybe_advance_stage / step().
+        self._stage_schedule: list[tuple[int, int]] = []
+        self._global_step = 0
+        self._cur_stage_idx = -1
         self.num_envs: int = self._env.num_envs
         self.device = self._env.device
         # Moving-chassis body index, cached once. Fixed-root robot: root_pos_w never moves while
@@ -1401,6 +1413,34 @@ class WarehouseGymEnv(gym.Env):
         obs, info = self._env.reset()
         return self._unwrap_obs(obs), info
 
+    def set_stage_schedule(self, schedule) -> None:
+        """Enable step-based curriculum auto-advance.
+
+        schedule: iterable of (start_step, stage). Empty disables (keep fixed set_stage). The stage
+        whose start_step is the largest one <= the current global step is applied; set_stage takes
+        effect on the NEXT episode reset. Counts ALL gym steps (train + periodic eval) — fine for a
+        coarse step-threshold curriculum. The vendor loop has no success-gate, so this is the
+        mechanism that makes the curriculum actually advance.
+        """
+        self._stage_schedule = sorted((int(s), int(st)) for s, st in schedule)
+        self._cur_stage_idx = -1
+        self._global_step = 0
+        self._maybe_advance_stage()
+
+    def _maybe_advance_stage(self) -> None:
+        """Apply the scheduled stage for the current global step (no-op if no schedule set)."""
+        if not self._stage_schedule:
+            return
+        idx = self._cur_stage_idx
+        for i, (start, _stage) in enumerate(self._stage_schedule):
+            if self._global_step >= start:
+                idx = i
+        if idx != self._cur_stage_idx:
+            self._cur_stage_idx = idx
+            stage = self._stage_schedule[idx][1]
+            self._env.set_stage(stage)
+            print(f"[curriculum] global_step {self._global_step}: -> stage {stage}", flush=True)
+
     def step(self, action):
         """Apply (6,) action [base_lin, base_ang, ee_dx, ee_dy, ee_dz, gripper]."""
         from env.action_pickup import split_action
@@ -1430,6 +1470,8 @@ class WarehouseGymEnv(gym.Env):
         self._env._update_carry_progress()                  # backing-up-from-zone detector
         self._env._update_pbs_shaping()                     # potential-based approach/carry shaping
         self._env._update_checkpoint()                      # snapshot for reset-to-checkpoint
+        self._global_step += 1                              # curriculum: count global env steps
+        self._maybe_advance_stage()                         # advance stage if a schedule crossed
         # Surface the one-shot task events so consumers (recorder summary, P3 buffer) don't have to
         # reach into ._env. info gains 3 (N,) bool tensors; the (obs,r,term,trunc,info) shape is unchanged.
         if isinstance(info, dict):

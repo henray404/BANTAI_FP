@@ -18,11 +18,11 @@ rewards:
   # negative weight here would now PUNISH progress). The dense total per episode telescopes to
   # ≈ weight·start_dist (BOUNDED, no 1000-step accumulation), so terminal bonuses dominate at the
   # values below. ↑weight = stronger per-step pull. See env/reward_pickup.py PBS_GAMMA (=0.997).
-  approach:   -0.01     # PBS ee->box. total ≈ 0.4·(~4 m) ≈ +1.6/episode
+  approach:   0.4     # PBS ee->box. total ≈ 0.4·(~4 m) ≈ +1.6/episode (RESTORED from -0.01: guidance dibutuhkan; ledakan dicegah oleh clamp di _update_pbs_shaping)
   grasp:      8.0     # one-shot when box grasped + lifted (raised 5→8: dominates approach ~5x)
 
   # ── Phase B: carry + place (holding) ──
-  carry:      -0.01     # PBS box->correct-zone. total ≈ 0.4·(~15 m) ≈ +6/episode
+  carry:      0.4     # PBS box->correct-zone. total ≈ 0.4·(~15 m) ≈ +6/episode (RESTORED from -0.01)
   deliver:   15.0     # per-step while correct box sits in correct color zone (raised 10→15: dominates carry ~2.5x)
 
   # ── Always-on penalties ──
