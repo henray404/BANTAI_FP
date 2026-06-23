@@ -18,11 +18,11 @@ rewards:
   # negative weight here would now PUNISH progress). The dense total per episode telescopes to
   # ≈ weight·start_dist (BOUNDED, no 1000-step accumulation), so terminal bonuses dominate at the
   # values below. ↑weight = stronger per-step pull. See env/reward_pickup.py PBS_GAMMA (=0.997).
-  approach:   0.4     # PBS ee->box. total ≈ 0.4·(~4 m) ≈ +1.6/episode
+  approach:   -0.01     # PBS ee->box. total ≈ 0.4·(~4 m) ≈ +1.6/episode
   grasp:      8.0     # one-shot when box grasped + lifted (raised 5→8: dominates approach ~5x)
 
   # ── Phase B: carry + place (holding) ──
-  carry:      0.4     # PBS box->correct-zone. total ≈ 0.4·(~15 m) ≈ +6/episode
+  carry:      -0.01     # PBS box->correct-zone. total ≈ 0.4·(~15 m) ≈ +6/episode
   deliver:   15.0     # per-step while correct box sits in correct color zone (raised 10→15: dominates carry ~2.5x)
 
   # ── Always-on penalties ──
@@ -35,7 +35,7 @@ rewards:
   collision:  2.0     # x(-1) => -2/step when chassis contact > 5N (rack / obstacle / wall)
   drop:      -2.0     # one-shot when box dropped mid-carry outside a zone
   under_rack: 2.0     # x(-1) => -2/step while the chassis is inside ANY rack footprint (under-rack)
-  carry_regress: 0.1  # x(-1) => -0.1/step once a HELD box stalls/backs-up ~5s without nearing the
+  carry_regress: 0.3  # x(-1) => -0.1/step once a HELD box stalls/backs-up ~5s without nearing the
                       # zone (CARRY_REGRESS_STEPS in warehouse_env.py). Stops "kelamaan mundur".
 
   # ── Failure-reset penalty (high, fixed) ──
