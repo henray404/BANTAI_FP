@@ -181,7 +181,17 @@ RIDGEBACK_FRANKA_CFG = ArticulationCfg(
         # instead of sagging to a gravity-rest pose each step. Matches FRANKA_PANDA_HIGH_PD_CFG
         # (Isaac-Lift-Cube/Reach-Franka). Boxes keep gravity, so a held box still has weight.
         # See bugs_errors/2026-06-16_arm-sag-gravity-relative-ik.md.
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=True),
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=True,
+            # STABILITY FIX (2026-06-24): cap depenetration velocity. Without it the chassis used the
+            # PhysX default (effectively unbounded), so a base-into-rack/wall interpenetration was
+            # resolved EXPLOSIVELY — the base launched at huge velocity → position diverged →
+            # contactN ~1e8 → contact-buffer overflow → PhysX CUDA error 700 (illegal memory access)
+            # mid-run. On the 48GB 4090 this is NOT the 8GB-BAR1 OOM case (bugs_errors/...error700.md);
+            # it is a numerical blowup. Matches the box's proven cap (1.0). The box already had this;
+            # the robot articulation did not. Bump to ~5.0 if depenetration is too slow after testing.
+            max_depenetration_velocity=1.0,
+        ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False,
             solver_position_iteration_count=12,
