@@ -25,7 +25,17 @@ from typing import Callable
 
 import numpy as np
 
-CSV_HEADER = ("step", "success_rate", "success_std", "mean_length", "mean_return")
+CSV_HEADER = ("step", "success_rate", "success_std", "mean_length", "mean_return",
+              "grasp_rate", "reach_rate")
+
+# Staged-success diagnostic: how close the policy got, even when it never delivers.
+# Three MONOTONE milestones per eval episode (deliver => grasp => reach):
+#   reach    : the hand got within REACH_RADIUS_M of the box (navigation worked),
+#   grasp    : the box was actually grasped/held at some point,
+#   deliver  : the held box reached its goal zone (== the spec success_rate, unchanged).
+# success_rate stays = deliver (the spec metric); grasp_rate/reach_rate are extra columns
+# so a flat-zero model-free baseline still shows partial progress instead of a bare 0.
+REACH_RADIUS_M = 1.0  # hand-to-box distance counted as "reached the box" (diagnostic only)
 
 
 def _rl_env(env):
@@ -88,6 +98,42 @@ def _delivered_this_step(rl, info) -> bool:
     return False
 
 
+def _grasped_now(rl, info) -> bool:
+    """True if the box is grasped/held on the step just taken.
+
+    Reads the env info 'grasp_event' (one-shot grasp), else falls back to the latched
+    `holding` state buffer on the unwrapped WarehouseRLEnv. Latched by the caller across
+    the episode, so a momentary grasp still counts.
+    """
+    if isinstance(info, dict) and "grasp_event" in info:
+        try:
+            return bool(np.asarray(_to_np(info["grasp_event"])).reshape(-1)[0])
+        except Exception:
+            pass
+    h = getattr(rl, "holding", None)
+    if h is not None:
+        try:
+            return bool(_to_np(h).reshape(-1)[0])
+        except Exception:
+            return False
+    return False
+
+
+def _reached_now(rl) -> bool:
+    """True if the hand is within REACH_RADIUS_M of the box on this step (diagnostic).
+
+    Uses reward_pickup.approach_box_distance (pure-tensor: distance(ee, box), and 0 while
+    holding — so a held box trivially counts as reached). Returns False if the signal is
+    unavailable (keeps eval robust on envs without it).
+    """
+    try:
+        from env.reward_pickup import approach_box_distance
+        d = float(np.asarray(_to_np(approach_box_distance(rl))).reshape(-1)[0])
+        return d < REACH_RADIUS_M
+    except Exception:
+        return False
+
+
 def evaluate_policy(env, act_fn: Callable[[dict], np.ndarray],
                     episodes: int = 5, recorder=None) -> dict[str, float]:
     """Run `episodes` deterministic eval episodes; return success/length/return means.
@@ -103,22 +149,26 @@ def evaluate_policy(env, act_fn: Callable[[dict], np.ndarray],
         {"success_rate": ..., "success_std": ..., "mean_length": ..., "mean_return": ...}
     """
     successes, lengths, returns = [], [], []
+    grasps, reaches = [], []
     rl = _rl_env(env)  # stable across resets; unwrap once
     for _ in range(episodes):
         obs, _ = env.reset()
         if recorder is not None:
             from env.scene_snapshot import capture_init_state
             recorder.begin(capture_init_state(rl))
-        done, ep_len, ep_ret, delivered = False, 0, 0.0, False
+        done, ep_len, ep_ret = False, 0, 0.0
+        delivered = grasped = reached = False
         while not done:
             action = act_fn(obs)
             obs, reward, terminated, truncated, info = env.step(action)
             r = float(np.asarray(_to_np(reward)).reshape(-1)[0])
             ep_ret += r
             ep_len += 1
-            # Latch success on the terminating step: the env auto-resets its buffers inside
-            # step(), so the old post-loop pickup_delivered() check always read 0.
+            # Latch milestones on the terminating step: the env auto-resets its buffers inside
+            # step(), so the old post-loop pickup_delivered() check always read 0. grasp/deliver
+            # read info events (survive the reset); reach reads live distance pre-reset only.
             delivered = delivered or _delivered_this_step(rl, info)
+            grasped = grasped or _grasped_now(rl, info)
             if recorder is not None:
                 from env.scene_snapshot import read_replay_state
                 robot_xyz, ee_xyz, holding = read_replay_state(rl)
@@ -126,19 +176,25 @@ def evaluate_policy(env, act_fn: Callable[[dict], np.ndarray],
             term = bool(np.asarray(_to_np(terminated)).reshape(-1)[0])
             trunc = bool(np.asarray(_to_np(truncated)).reshape(-1)[0])
             done = term or trunc
+            if not done:
+                reached = reached or _reached_now(rl)
             if term:
                 break
-        succ = 1.0 if delivered else 0.0
-        successes.append(succ)
+        reached = reached or grasped or delivered  # monotone: deliver => grasp => reach
+        successes.append(1.0 if delivered else 0.0)
+        grasps.append(1.0 if grasped else 0.0)
+        reaches.append(1.0 if reached else 0.0)
         lengths.append(ep_len)
         returns.append(ep_ret)
         if recorder is not None:
-            recorder.end(succ, ep_ret)
+            recorder.end(1.0 if delivered else 0.0, ep_ret)
     return {
         "success_rate": float(np.mean(successes)),
         "success_std": float(np.std(successes)),
         "mean_length": float(np.mean(lengths)),
         "mean_return": float(np.mean(returns)),
+        "grasp_rate": float(np.mean(grasps)),
+        "reach_rate": float(np.mean(reaches)),
     }
 
 
@@ -165,7 +221,7 @@ class EvalCsv:
                 csv.writer(f).writerow(CSV_HEADER)
 
     def log(self, step: int, metrics: dict[str, float]) -> None:
-        """Append one eval row for env-step `step`."""
+        """Append one eval row for env-step `step` (grasp/reach default 0.0 if absent)."""
         with self.path.open("a", newline="") as f:
             csv.writer(f).writerow([
                 int(step),
@@ -173,6 +229,8 @@ class EvalCsv:
                 metrics.get("success_std", 0.0),
                 metrics["mean_length"],
                 metrics["mean_return"],
+                metrics.get("grasp_rate", 0.0),
+                metrics.get("reach_rate", 0.0),
             ])
 
 

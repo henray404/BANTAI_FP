@@ -122,6 +122,11 @@ def main() -> None:
                 metrics = evaluate_policy(self._eval_env, act, self._episodes,
                                           recorder=self._traj)
                 self._csv.log(self.num_timesteps, metrics)
+                # Mirror eval metrics into TB (eval/*) so the staged success shows on graphs.
+                for k in ("success_rate", "grasp_rate", "reach_rate",
+                          "mean_length", "mean_return"):
+                    if k in metrics:
+                        self.logger.record(f"eval/{k}", metrics[k])
                 if self._best.update(self.num_timesteps, metrics):
                     self.model.save(str(self._best.dir / "best_model"))
                 # BUG 3 resync: eval reset+stepped the SAME underlying Isaac env (only one sim
