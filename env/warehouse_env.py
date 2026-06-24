@@ -510,6 +510,11 @@ class WarehouseEnvCfg(ManagerBasedRLEnvCfg):
         self.decimation = 20           # 200 Hz / 20 = 10 Hz control (DreamerNav std, saves VRAM)
         self.episode_length_s = 100.0  # 100s x 10Hz = 1000 steps (nav + grasp + carry + place)
         self.sim.dt = 0.005
+        # WORKAROUND (2026-06-24): GPU PhysX solver crashes (CUDA error 700, PxgTGSCudaSolverCore)
+        # recur on this machine (RTX 4060 8GB) even after VRAM-zombie cleanup + lower chassis
+        # depenetration cap. Force CPU physics to bypass the GPU solver entirely. Slower per-step
+        # (single env, so tolerable); revert (delete this line) if the GPU solver proves stable again.
+        self.sim.device = "cpu"
         # Live env knobs from configs/env_config.yaml override the defaults just set (missing keys
         # keep them). Base speed lives in module globals (read at call time in _base_cmd), so update
         # them here. ponytail: globals are process-wide — fine at num_envs=1, last cfg wins if many.
@@ -1328,7 +1333,12 @@ class WarehouseRLEnv(ManagerBasedRLEnv):
             if small_h is not None:
                 standoff = small_h[1] if heavy else small_h[0]
             else:
-                standoff = 1.1 if heavy else 1.0
+                # Clearance = rack_half_depth(0.45) + base_half_len(0.48) = 0.93 m center-to-center
+                # before edges touch. Old 1.0/1.1 left only ~0.07 m → base clipped the rack's own
+                # north face at spawn → contactN spikes (thousands) → `crashed` at ep_len≈8, so the
+                # policy never learned (back-and-forth degenerate). Raised to clear with ~0.3 m margin
+                # (1.25/1.40); the policy/demo still drives the last ~0.6 m in for the grab.
+                standoff = 1.4 if heavy else 1.25
             base_x, base_y, yaw = spawn_pose_near_box((bx, by), standoff=standoff)
             origin = self.scene.env_origins[e]
             root[e, 0] = origin[0] + base_x

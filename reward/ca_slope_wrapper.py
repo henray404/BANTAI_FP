@@ -87,10 +87,16 @@ class CASlopeEnvWrapper:
         phi = self._potential()
         if self._prev_phi is None:
             self._prev_phi = phi
+        # F = gamma*Phi(s') - Phi(s), the smooth per-step PBRS term only.
+        # NO terminal -Phi(s) bonus (was: blended on terminated|truncated). CRITICAL (2026-06-24):
+        # Phi is negative-definite (= -gain*remaining), so the old -Phi(s) terminal term was a LARGE
+        # POSITIVE one-shot (~+30 with phase_b_offset=13, gain=2) paid on EVERY episode end far from
+        # goal -- timeout (truncated), crash/bounds/stuck (terminated). It dwarfed deliver(+15) and
+        # failure_penalty(-15), so the agent learned to linger to the 1000-step cap / crash for the
+        # bonus: return collapse, length pinned at the cap, actor stops exploring. On a GENUINE
+        # success Phi~=0 (box at zone), so dropping the convention costs ~0 there. Timeouts must
+        # BOOTSTRAP, not terminate; failures are already priced by failure_penalty in the base reward.
         f = self.shaper.gamma * phi - self._prev_phi
-        # PBRS terminal convention Phi(terminal)=0 -> F = -Phi(s); blend per-env (arithmetic gate).
-        d = (terminated | truncated) * 1.0
-        f = f * (1.0 - d) + (-self._prev_phi) * d
         self._prev_phi = phi
 
         shaped = reward + f
