@@ -146,18 +146,36 @@ def test_wrapper_mode_none_is_passthrough():
     assert "ca_slope_shaping" not in info
 
 
-def test_wrapper_terminal_uses_negative_prev_potential():
-    class _TermEnv(_FakeWarehouseEnv):
+def _wrapper_step_with_done(terminated: bool, truncated: bool):
+    """Run one wrapper step that ends the episode; return (reward, expected smooth F)."""
+    class _DoneEnv(_FakeWarehouseEnv):
         def step(self, action):
             self.ee_pos = self.ee_pos + np.array([[0.0, -1.0, 0.0]])
-            return {"dummy": 0}, np.array([0.0]), np.array([True]), np.array([False]), {}
+            return ({"dummy": 0}, np.array([0.0]),
+                    np.array([terminated]), np.array([truncated]), {})
 
-    env = _TermEnv()
+    env = _DoneEnv()
     shaper = CASlopeShaper()
     w = CASlopeEnvWrapper(env, shaper=shaper, mode="category")
     w.reset()
     phi_prev = float(shaper.potential(env.ee_pos, env.box_pos, env.goal_pos,
                                       env.holding, env.goal_id_buf)[0])
-    _, reward, term, _, _ = w.step(np.zeros(6))
-    assert bool(np.asarray(term)[0])
-    assert np.isclose(float(np.asarray(reward)[0]), -phi_prev)  # F = gamma*0 - Phi(s)
+    _, reward, _, _, _ = w.step(np.zeros(6))
+    phi_next = float(shaper.potential(env.ee_pos, env.box_pos, env.goal_pos,
+                                      env.holding, env.goal_id_buf)[0])
+    return float(np.asarray(reward)[0]), shaper.gamma * phi_next - phi_prev
+
+
+def test_wrapper_truncation_gets_no_terminal_bonus():
+    # REGRESSION (2026-06-24): a timeout (truncated) must NOT pay the -Phi(s) terminal bonus.
+    # Phi is negative-definite, so that bonus was a large POSITIVE one-shot that rewarded lingering
+    # to the episode-length cap -> return collapse. A truncated step must BOOTSTRAP (smooth F only).
+    reward, expected_smooth_f = _wrapper_step_with_done(terminated=False, truncated=True)
+    assert np.isclose(reward, expected_smooth_f)
+
+
+def test_wrapper_failure_terminal_gets_no_terminal_bonus():
+    # A failure terminal (crash/bounds/stuck, all terminated=True) is already priced by the base
+    # failure_penalty; the wrapper must not hand it a large +(-Phi) bonus for ending far from goal.
+    reward, expected_smooth_f = _wrapper_step_with_done(terminated=True, truncated=False)
+    assert np.isclose(reward, expected_smooth_f)
